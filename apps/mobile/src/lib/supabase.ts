@@ -141,18 +141,44 @@ const JOB_SELECT = [
  * Within each status the order is newest-first, so the active list leads with the
  * postings that just appeared.
  */
-export async function fetchJobs(limit = 400): Promise<JobRow[]> {
+/**
+ * Rows per request. PostgREST refuses a `limit` above the server's max-rows
+ * setting (1,000 by default on Supabase), so anything larger needs real paging.
+ */
+const PAGE_SIZE = 500;
+
+/**
+ * Safety valve per status. The board is one person's job search and grows slowly,
+ * but a runaway table should not download forever — 2,000 rows is roughly 2.5 MB
+ * once summaries and extractions are populated.
+ */
+const MAX_ROWS_PER_STATUS = 2_000;
+
+/** One status, paged until it is exhausted or the cap is reached. */
+async function fetchByStatus(status: 'ACTIVE' | 'EXPIRED', cap: number): Promise<JobRow[]> {
+  const rows: JobRow[] = [];
+  for (let offset = 0; offset < cap; offset += PAGE_SIZE) {
+    const size = Math.min(PAGE_SIZE, cap - offset);
+    const page = await rest<JobRow[]>('/jobs', {
+      query:
+        `select=${JOB_SELECT}&status=eq.${status}` +
+        `&order=first_seen_at.desc&limit=${size}&offset=${offset}`,
+    });
+    const batch = page ?? [];
+    rows.push(...batch);
+    if (batch.length < size) break;
+  }
+  return rows;
+}
+
+export async function fetchJobs(limit = MAX_ROWS_PER_STATUS): Promise<JobRow[]> {
   const [active, expired] = await Promise.all([
-    rest<JobRow[]>('/jobs', {
-      query: `select=${JOB_SELECT}&status=eq.ACTIVE&order=first_seen_at.desc&limit=${limit}`,
-    }),
-    rest<JobRow[]>('/jobs', {
-      query: `select=${JOB_SELECT}&status=eq.EXPIRED&order=first_seen_at.desc&limit=${limit}`,
-    }),
+    fetchByStatus('ACTIVE', limit),
+    fetchByStatus('EXPIRED', limit),
   ]);
   // Active first, preserving the previous ordering, so the list still opens on
   // live postings.
-  return [...(active ?? []), ...(expired ?? [])];
+  return [...active, ...expired];
 }
 
 export async function fetchJob(id: string): Promise<JobRow | null> {

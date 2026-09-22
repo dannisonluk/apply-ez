@@ -24,6 +24,24 @@ const KEYS = {
 export type ResumeSlot = 'tech' | 'data' | 'general';
 export type ResumeSelection = Partial<Record<ResumeSlot, string>>;
 
+/**
+ * Canonical labels for the three resume slots.
+ *
+ * One map because three screens each carried their own copy, and the same CV was
+ * called "Data / BA" on the job page, "Data / business analyst" in the application
+ * history and "Data + business analyst" in settings. That reads as three different
+ * documents.
+ *
+ * Deliberately short: the job page renders them as three equal-width chips, and the
+ * longer spellings wrap or clip there. Settings carries a `hint` beside each one
+ * for the detail.
+ */
+export const RESUME_SLOT_LABELS: Record<ResumeSlot, string> = {
+  tech: 'Tech',
+  data: 'Data / BA',
+  general: 'General',
+};
+
 async function getString(key: string): Promise<string | null> {
   try {
     return await AsyncStorage.getItem(key);

@@ -20,6 +20,7 @@ import {
   getPushEnabled,
   getResumeSelection,
   getStoredPushToken,
+  RESUME_SLOT_LABELS,
   setPushEnabled,
   type ResumeSlot,
 } from '../../src/lib/storage';
@@ -28,9 +29,9 @@ import { useSession } from '../../src/state/session';
 import { palettes, useTheme, type Theme } from '../../src/theme';
 
 const RESUME_SLOTS: Array<{ key: ResumeSlot; label: string; hint: string }> = [
-  { key: 'tech', label: 'Tech / programmer', hint: 'Engineering roles' },
-  { key: 'data', label: 'Data + business analyst', hint: 'Analytics and BA roles' },
-  { key: 'general', label: 'General', hint: 'Everything else' },
+  { key: 'tech', label: RESUME_SLOT_LABELS.tech, hint: 'Engineering and developer roles' },
+  { key: 'data', label: RESUME_SLOT_LABELS.data, hint: 'Analytics and business analyst roles' },
+  { key: 'general', label: RESUME_SLOT_LABELS.general, hint: 'Everything else' },
 ];
 
 /**
@@ -281,7 +282,7 @@ export default function SettingsScreen(): React.JSX.Element {
             <View style={s.switchLabel}>
               <Text style={s.switchTitle}>New job alerts</Text>
               <Text style={s.switchHint}>
-                Sent after a scrape run finds new postings. The scraper runs every four hours.
+                Sent after a scrape run finds new postings. The scraper runs every six hours.
               </Text>
             </View>
             <Switch
@@ -390,7 +391,7 @@ export default function SettingsScreen(): React.JSX.Element {
             value={String(Constants.expoConfig?.sdkVersion ?? '54')}
           />
           <DetailRow icon="git-branch-outline" label="Scraper" value="12 HK employers" />
-          <DetailRow icon="time-outline" label="Schedule" value="Every 4 hours" />
+          <DetailRow icon="time-outline" label="Schedule" value="Every 6 hours" />
         </Card>
       </Section>
 

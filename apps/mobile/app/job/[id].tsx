@@ -27,13 +27,13 @@ import {
 import { useJobs } from '../../src/state/jobs';
 import { useSession } from '../../src/state/session';
 import { palettes, useTheme, type Theme } from '../../src/theme';
+import { RESUME_SLOT_LABELS, type ResumeSlot } from '../../src/lib/storage';
 import { toJobView, type JobView } from '../../src/types';
 
-const RESUME_SLOTS = [
-  { key: 'tech', label: 'Tech' },
-  { key: 'data', label: 'Data / BA' },
-  { key: 'general', label: 'General' },
-] as const;
+/** Shaped as `{key, label}` pairs so the chips and the lookup agree by construction. */
+const RESUME_SLOTS = (
+  Object.entries(RESUME_SLOT_LABELS) as Array<[ResumeSlot, string]>
+).map(([key, label]) => ({ key, label }));
 
 export default function JobDetailScreen(): React.JSX.Element {
   const theme = useTheme();

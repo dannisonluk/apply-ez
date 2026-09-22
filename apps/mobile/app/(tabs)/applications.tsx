@@ -16,13 +16,8 @@ import { Card, EmptyState, Pill, PrimaryButton, Spinner } from '../../src/compon
 import { formatRelative } from '../../src/lib/format';
 import { useSession } from '../../src/state/session';
 import { palettes, useTheme, type Theme } from '../../src/theme';
+import { RESUME_SLOT_LABELS, type ResumeSlot } from '../../src/lib/storage';
 import type { AppliedJob } from '../../src/types';
-
-const RESUME_LABELS: Record<string, string> = {
-  tech: 'Tech / programmer',
-  data: 'Data / business analyst',
-  general: 'General',
-};
 
 export default function ApplicationsScreen(): React.JSX.Element {
   const theme = useTheme();
@@ -169,7 +164,7 @@ function ApplicationCard({ application }: { application: AppliedJob }): React.JS
 
   const applied = formatRelative(application.applied_at);
   const resume = application.resume_key
-    ? (RESUME_LABELS[application.resume_key] ?? application.resume_key)
+    ? (RESUME_SLOT_LABELS[application.resume_key as ResumeSlot] ?? application.resume_key)
     : null;
 
   return (

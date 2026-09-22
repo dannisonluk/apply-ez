@@ -28,6 +28,83 @@ const FILTERS: Array<{ key: FilterKey; label: string; icon: keyof typeof Ionicon
   { key: 'closing', label: 'Closing soon', icon: 'hourglass-outline' },
 ];
 
+// ─── filter panel ────────────────────────────────────────────────────────────
+
+type SortKey = 'discovered' | 'posted' | 'match';
+
+const SORTS: Array<{ key: SortKey; label: string; icon: keyof typeof Ionicons.glyphMap }> = [
+  { key: 'discovered', label: 'Newest', icon: 'sparkles-outline' },
+  { key: 'posted', label: 'Posted', icon: 'calendar-outline' },
+  { key: 'match', label: 'Best match', icon: 'star-outline' },
+];
+
+/**
+ * Years-of-experience buckets.
+ *
+ * Buckets rather than a slider because the underlying number is genuinely coarse:
+ * it is whatever the model read off the JD, and a posting that says "3 to 5 years"
+ * has a range, not a point. A slider would imply a precision the data does not have.
+ *
+ * "Not stated" is a real bucket, not a fallback. Before enrichment runs, no job has
+ * a YOE at all, and hiding those silently would empty the board.
+ */
+const YOE_BUCKETS: Array<{
+  key: string;
+  label: string;
+  min: number | null;
+  max: number | null;
+}> = [
+  { key: '0-2', label: '0–2 yrs', min: 0, max: 2 },
+  { key: '3-5', label: '3–5 yrs', min: 3, max: 5 },
+  { key: '6-9', label: '6–9 yrs', min: 6, max: 9 },
+  { key: '10+', label: '10+ yrs', min: 10, max: Number.MAX_SAFE_INTEGER },
+  { key: 'unspecified', label: 'Not stated', min: null, max: null },
+];
+
+const EMPLOYMENT_TYPES: Array<{ key: string; label: string }> = [
+  { key: 'PERMANENT', label: 'Permanent' },
+  { key: 'CONTRACT', label: 'Contract' },
+  { key: 'INTERNSHIP', label: 'Internship' },
+];
+
+/** Best available years-of-experience: the model's range wins over the scraped floor. */
+function jobYoe(job: JobView): number | null {
+  return job.yoeMin ?? job.experienceMin ?? null;
+}
+
+function matchesYoe(job: JobView, key: string): boolean {
+  const bucket = YOE_BUCKETS.find((entry) => entry.key === key);
+  if (!bucket) return true;
+  const yoe = jobYoe(job);
+  if (bucket.min === null) return yoe === null;
+  if (yoe === null) return false;
+  return yoe >= bucket.min && yoe <= (bucket.max ?? Number.MAX_SAFE_INTEGER);
+}
+
+/** Counted from the pool, so a facet option is never offered with zero results. */
+function facetCounts(
+  jobs: JobView[],
+  keyOf: (job: JobView) => string | null,
+  labelOf: (job: JobView) => string,
+): Array<{ key: string; label: string; count: number }> {
+  const counts = new Map<string, { label: string; count: number }>();
+  for (const job of jobs) {
+    const key = keyOf(job);
+    if (!key) continue;
+    const entry = counts.get(key);
+    if (entry) entry.count += 1;
+    else counts.set(key, { label: labelOf(job), count: 1 });
+  }
+  return [...counts.entries()]
+    .map(([key, value]) => ({ key, label: value.label, count: value.count }))
+    .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+}
+
+/** Add or remove one value from a multi-select list without mutating it. */
+function toggleValue(list: string[], value: string): string[] {
+  return list.includes(value) ? list.filter((item) => item !== value) : [...list, value];
+}
+
 export default function JobsScreen(): React.JSX.Element {
   const theme = useTheme();
   const s = styles[theme.scheme];
@@ -55,6 +132,28 @@ export default function JobsScreen(): React.JSX.Element {
   const [filter, setFilter] = useState<FilterKey>('all');
   const [status, setStatus] = useState<StatusKey>('active');
   const [query, setQuery] = useState('');
+
+  // Panel filters. Component state rather than persisted storage, unlike the
+  // relevance threshold and the show-filtered switch: those are standing
+  // preferences, these are "what am I looking at right now" and should not survive
+  // a restart as a filter you forgot to clear.
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [companies, setCompanies] = useState<string[]>([]);
+  const [departments, setDepartments] = useState<string[]>([]);
+  const [yoe, setYoe] = useState<string | null>(null);
+  const [employment, setEmployment] = useState<string | null>(null);
+  const [sort, setSort] = useState<SortKey>('discovered');
+
+  /** Shown on the panel chip, so an active filter can never be invisible. */
+  const activeFilterCount =
+    companies.length + departments.length + (yoe ? 1 : 0) + (employment ? 1 : 0);
+
+  const clearFilters = useCallback(() => {
+    setCompanies([]);
+    setDepartments([]);
+    setYoe(null);
+    setEmployment(null);
+  }, []);
 
   // A tapped notification routes here with `?filter=new`, so the user lands
   // directly on what the notification was about.
@@ -84,38 +183,113 @@ export default function JobsScreen(): React.JSX.Element {
   // Chip counts describe the pool they filter. Deriving them from `visible` alone
   // would let the banner announce "Showing 135 low-match jobs" while "All" still
   // reported only the high-match total.
-  const newInPool = useMemo(
-    () => activePool.filter((job) => job.isNew).length,
-    [activePool],
+  /**
+   * Everything the panel and the search box select, before the All / New /
+   * Closing chips are applied.
+   *
+   * Split out so all three chips can report against the same pool. Counting the
+   * All chip off `activePool` instead made the filters look broken: selecting a
+   * company changed the list but not the number, which reads as "nothing
+   * happened".
+   */
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return base.filter((job) => {
+      if (companies.length > 0 && !companies.includes(job.companySlug)) return false;
+      if (departments.length > 0 && !(job.department && departments.includes(job.department))) {
+        return false;
+      }
+      if (yoe && !matchesYoe(job, yoe)) return false;
+      if (employment && job.employmentType !== employment) return false;
+      if (needle && !matches(job, needle)) return false;
+      return true;
+    });
+  }, [base, query, companies, departments, yoe, employment]);
+
+  /** True for an open posting whose deadline is inside the next three weeks. */
+  const isClosingSoon = useCallback((job: JobView): boolean => {
+    const days = daysUntil(job.deadline);
+    return days !== null && days >= 0 && days <= 21;
+  }, []);
+
+  const chipCounts = useMemo(
+    () => ({
+      all: filtered.length,
+      new: filtered.filter((job) => job.isNew).length,
+      closing: filtered.filter(isClosingSoon).length,
+    }),
+    [filtered, isClosingSoon],
+  );
+
+  // Facet options are counted from the pool currently in view, so the panel never
+  // offers an option that has zero results behind it.
+  const companyFacets = useMemo(
+    () =>
+      facetCounts(base, (job) => job.companySlug || job.companyName, (job) => job.companyName),
+    [base],
+  );
+
+  const departmentFacets = useMemo(
+    () => facetCounts(base, (job) => job.department, (job) => job.department ?? ''),
+    [base],
+  );
+
+  // Bucket counts need the bucket logic rather than a plain key, so they are
+  // counted by walking the buckets per job — still linear, and one job lands in
+  // exactly one bucket by construction.
+  const yoeFacets = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const job of base) {
+      for (const bucket of YOE_BUCKETS) {
+        if (matchesYoe(job, bucket.key)) {
+          counts.set(bucket.key, (counts.get(bucket.key) ?? 0) + 1);
+          break;
+        }
+      }
+    }
+    return counts;
+  }, [base]);
+
+  const employmentFacets = useMemo(
+    () => facetCounts(base, (job) => job.employmentType, (job) => job.employmentType ?? ''),
+    [base],
   );
 
   const list = useMemo(() => {
-    const needle = query.trim().toLowerCase();
+    // The All / New / Closing chips only mean something on the active board.
+    let next = filtered;
+    if (status === 'active') {
+      if (filter === 'new') next = next.filter((job) => job.isNew);
+      if (filter === 'closing') next = next.filter(isClosingSoon);
+    }
 
-    let next = base.filter((job) => {
-      if (status === 'closed') return true;
-      if (filter === 'new' && !job.isNew) return false;
-      if (filter === 'closing') {
-        const days = daysUntil(job.deadline);
-        // Only jobs that are still open and within three weeks.
-        if (days === null || days < 0 || days > 21) return false;
-      }
-      return true;
-    });
-
-    if (needle) next = next.filter((job) => matches(job, needle));
-
-    // "Closing soon" is only useful when ordered by deadline.
+    // "Closing soon" is only useful when ordered by deadline, so it wins over the
+    // sort picker rather than being overridden by it.
     if (filter === 'closing' && status === 'active') {
-      next = [...next].sort((a, b) => {
+      return [...next].sort((a, b) => {
         const left = daysUntil(a.deadline) ?? Number.MAX_SAFE_INTEGER;
         const right = daysUntil(b.deadline) ?? Number.MAX_SAFE_INTEGER;
         return left - right;
       });
     }
 
-    return next;
-  }, [base, filter, status, query]);
+    return [...next].sort((a, b) => {
+      // firstSeenAt is the tiebreak everywhere: it is the only field every row
+      // has, and it is what "newest" actually means to the user.
+      const seenDesc = Date.parse(b.firstSeenAt) - Date.parse(a.firstSeenAt);
+      if (sort === 'match') {
+        if (b.relevanceScore !== a.relevanceScore) return b.relevanceScore - a.relevanceScore;
+        return seenDesc;
+      }
+      if (sort === 'posted') {
+        const left = Date.parse(a.publishedAt);
+        const right = Date.parse(b.publishedAt);
+        if (right !== left) return right - left;
+        return seenDesc;
+      }
+      return seenDesc;
+    });
+  }, [filtered, filter, status, sort, isClosingSoon]);
 
   const openJob = useCallback(
     (job: JobView) => {
@@ -199,12 +373,14 @@ export default function JobsScreen(): React.JSX.Element {
           <View style={s.filterRow}>
             {FILTERS.map((option) => {
               const active = filter === option.key;
+              // Every chip counts the same pool, so the three of them add up to
+              // something the user can reason about while filtering.
               const count =
                 option.key === 'new'
-                  ? newInPool
+                  ? chipCounts.new
                   : option.key === 'all'
-                    ? activePool.length
-                    : undefined;
+                    ? chipCounts.all
+                    : chipCounts.closing;
               return (
                 <Pressable
                   key={option.key}
@@ -233,6 +409,105 @@ export default function JobsScreen(): React.JSX.Element {
           </Text>
         )}
       </View>
+
+      {/* Panel toggle. Offered on the Closed tab as well: a company filter is how
+          you answer "has MTR closed anything recently". */}
+      <Pressable
+        testID="filters-toggle"
+        onPress={() => setPanelOpen((open) => !open)}
+        accessibilityRole="button"
+        accessibilityState={{ expanded: panelOpen }}
+        style={[s.panelToggle, activeFilterCount > 0 ? s.panelToggleActive : null]}
+      >
+        <Ionicons
+          name="options-outline"
+          size={14}
+          color={activeFilterCount > 0 ? theme.color.primary : theme.color.textMuted}
+        />
+        <Text style={[s.panelToggleText, activeFilterCount > 0 ? s.panelToggleTextActive : null]}>
+          Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
+        </Text>
+        <Ionicons
+          name={panelOpen ? 'chevron-up-outline' : 'chevron-down-outline'}
+          size={13}
+          color={theme.color.textFaint}
+        />
+      </Pressable>
+
+      {panelOpen ? (
+        <View testID="filters-panel" style={s.panel}>
+          <FilterSection label="Sort" testID="facet-sort">
+            {SORTS.map((option) => (
+              <OptionChip
+                key={option.key}
+                label={option.label}
+                icon={option.icon}
+                selected={sort === option.key}
+                onPress={() => setSort(option.key)}
+              />
+            ))}
+          </FilterSection>
+
+          <FilterSection label={`Company (${companyFacets.length})`} testID="facet-company">
+            {companyFacets.map((facet) => (
+              <OptionChip
+                key={facet.key}
+                label={facet.label}
+                count={facet.count}
+                selected={companies.includes(facet.key)}
+                onPress={() => setCompanies((current) => toggleValue(current, facet.key))}
+              />
+            ))}
+          </FilterSection>
+
+          {departmentFacets.length > 0 ? (
+            <FilterSection label="Department" testID="facet-department">
+              {departmentFacets.slice(0, 12).map((facet) => (
+                <OptionChip
+                  key={facet.key}
+                  label={facet.label}
+                  count={facet.count}
+                  selected={departments.includes(facet.key)}
+                  onPress={() => setDepartments((current) => toggleValue(current, facet.key))}
+                />
+              ))}
+            </FilterSection>
+          ) : null}
+
+          <FilterSection label="Experience" testID="facet-experience">
+            {YOE_BUCKETS.map((bucket) => (
+              <OptionChip
+                key={bucket.key}
+                label={bucket.label}
+                count={yoeFacets.get(bucket.key) ?? 0}
+                selected={yoe === bucket.key}
+                onPress={() => setYoe((current) => (current === bucket.key ? null : bucket.key))}
+              />
+            ))}
+          </FilterSection>
+
+          <FilterSection label="Type" testID="facet-type">
+            {EMPLOYMENT_TYPES.map((option) => (
+              <OptionChip
+                key={option.key}
+                label={option.label}
+                count={employmentFacets.find((facet) => facet.key === option.key)?.count ?? 0}
+                selected={employment === option.key}
+                onPress={() =>
+                  setEmployment((current) => (current === option.key ? null : option.key))
+                }
+              />
+            ))}
+          </FilterSection>
+
+          {activeFilterCount > 0 ? (
+            <Pressable onPress={clearFilters} accessibilityRole="button" style={s.clearButton}>
+              <Ionicons name="close-circle-outline" size={14} color={theme.color.textMuted} />
+              <Text style={s.clearText}>Clear all filters</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
 
       {/* The relevance filter is never silent: when it hides something, it says how
           much and offers to reveal it. A filter that hides jobs without saying so is
@@ -309,6 +584,64 @@ export default function JobsScreen(): React.JSX.Element {
           keyboardDismissMode="on-drag"
         />
       )}
+    </View>
+  );
+}
+
+/** One option in the filter panel, using the same chip language as the list. */
+function OptionChip({
+  label,
+  icon,
+  selected,
+  count,
+  onPress,
+}: {
+  label: string;
+  icon?: keyof typeof Ionicons.glyphMap | undefined;
+  selected: boolean;
+  count?: number | undefined;
+  onPress: () => void;
+}): React.JSX.Element {
+  const theme = useTheme();
+  const s = styles[theme.scheme];
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityState={{ selected }}
+      style={[s.chip, selected ? s.chipActive : null]}
+    >
+      {icon ? (
+        <Ionicons
+          name={icon}
+          size={13}
+          color={selected ? theme.color.primary : theme.color.textMuted}
+        />
+      ) : null}
+      <Text style={[s.chipText, selected ? s.chipTextActive : null]}>
+        {label}
+        {count !== undefined ? ` ${count}` : ''}
+      </Text>
+    </Pressable>
+  );
+}
+
+function FilterSection({
+  label,
+  testID,
+  children,
+}: {
+  label: string;
+  /** Scopes the chips for tests, which would otherwise have to guess from text. */
+  testID: string;
+  children: React.ReactNode;
+}): React.JSX.Element {
+  const theme = useTheme();
+  const s = styles[theme.scheme];
+  return (
+    <View testID={testID} style={s.panelSection}>
+      <Text style={s.panelLabel}>{label}</Text>
+      <View style={s.panelOptions}>{children}</View>
     </View>
   );
 }
@@ -397,7 +730,7 @@ function EmptyList({
       <EmptyState
         icon="sparkles-outline"
         title="Nothing new"
-        message="No jobs have been posted since you last opened the app. The scraper runs every four hours."
+        message="No jobs have been posted since you last opened the app. The scraper runs every six hours."
         actionLabel="Show all jobs"
         onAction={onReset}
       />
@@ -536,6 +869,68 @@ const makeStyles = (theme: Theme) =>
       fontSize: theme.font.caption,
       color: theme.color.textFaint,
       lineHeight: 17,
+    },
+    panelToggle: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      alignSelf: 'flex-start',
+      gap: theme.space(1.5),
+      marginHorizontal: theme.space(4),
+      marginBottom: theme.space(2),
+      paddingHorizontal: theme.space(3),
+      paddingVertical: theme.space(1.5),
+      borderRadius: theme.radius.pill,
+      backgroundColor: theme.color.surfaceAlt,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: 'transparent',
+    },
+    panelToggleActive: {
+      backgroundColor: theme.color.primarySoft,
+      borderColor: theme.color.primary,
+    },
+    panelToggleText: {
+      fontSize: theme.font.label,
+      fontWeight: '700',
+      color: theme.color.textMuted,
+    },
+    panelToggleTextActive: {
+      color: theme.color.primary,
+    },
+    panel: {
+      marginHorizontal: theme.space(4),
+      marginBottom: theme.space(2),
+      paddingHorizontal: theme.space(3),
+      paddingVertical: theme.space(3),
+      borderRadius: theme.radius.md,
+      backgroundColor: theme.color.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.color.border,
+      gap: theme.space(3),
+    },
+    panelSection: {
+      gap: theme.space(1.5),
+    },
+    panelLabel: {
+      fontSize: theme.font.caption,
+      fontWeight: '700',
+      color: theme.color.textMuted,
+    },
+    panelOptions: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: theme.space(1.5),
+    },
+    clearButton: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: theme.space(1.5),
+      paddingVertical: theme.space(2),
+    },
+    clearText: {
+      fontSize: theme.font.caption,
+      fontWeight: '700',
+      color: theme.color.textMuted,
     },
     hiddenBanner: {
       flexDirection: 'row',

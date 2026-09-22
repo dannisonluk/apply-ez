@@ -10,6 +10,9 @@
  */
 import {
   DEFAULT_MIN_RELEVANCE,
+  TARGET_FAMILIES,
+  TARGET_YOE_MAX,
+  TARGET_YOE_MIN,
   blocklistHit,
   relevanceBand,
   roleFamilyOf,
@@ -31,6 +34,16 @@ function check(name: string, condition: boolean, detail?: unknown): void {
 
 /** Titles that should survive the filter. */
 const SHOULD_KEEP: Array<[title: string, department: string]> = [
+  // The three role targets, stated explicitly.
+  ['Data Analyst', 'Digital & Information Technology'],
+  ['Business Analyst, Digital Transformation', 'Digital & Information Technology'],
+  ['Software Engineer (Backend)', 'Digital & Information Technology'],
+  ['Senior Systems Analyst', 'Digital & Information Technology'],
+  ['Analyst Programmer', 'Digital & Information Technology'],
+  // An analytical role inside an operational division is still an analytical role:
+  // DATA must outrank AVIATION_OPS or "Cargo Data Analyst" is written off as cargo.
+  ['Data Analyst – Cargo Performance', 'Airport & Cargo Operations'],
+  // The original Cathay fixtures.
   ['IT Security Assurance Lead (Assessment and Penetration Test) (36-month Contract)', 'Digital & Information Technology'],
   ['Senior Solution Lead – Subsidiaries (Cathay Cargo Terminal)', 'Digital & Information Technology'],
   ['Assistant Manager, Innovation', 'Digital & Information Technology'],
@@ -42,6 +55,8 @@ const SHOULD_KEEP: Array<[title: string, department: string]> = [
   ['Project Executive (9-month contract)', 'Project Management'],
   ['Procurement Centre of Excellence Lead - Procure-to-Pay Global Process Owner', 'Procurement'],
   ['Financial Analyst', 'Finance'],
+  // Kept, but it must rank well below the three targets — see section 8.
+  ['IT Support Officer', 'Information Technology'],
 ];
 
 /** Titles that should be filtered out — service, manual and operations roles. */
@@ -55,6 +70,8 @@ const SHOULD_FILTER: Array<[title: string, department: string]> = [
   // A commercial logistics role, not an analytical one. Worth keeping as a fixture
   // because "Assistant Manager" reads senior-but-relevant at a glance.
   ['Assistant Manager Cargo Distribution (Project) (18-month contract)', 'Airport & Cargo Operations'],
+  // "Analyst" in the title, but it is a support-desk role.
+  ['Service Desk Analyst', 'Information Technology'],
   ['Cleaner', 'Facilities'],
   ['Driver', 'Transport'],
   ['Security Guard', 'Corporate Security'],
@@ -87,14 +104,17 @@ check('blocklist: empty title is safe', blocklistHit('') === null);
 // ─── 2. role family ──────────────────────────────────────────────────────────
 
 check('family: software engineer', roleFamilyOf('Software Engineer') === 'TECH');
-check('family: IT security', roleFamilyOf('IT Security Assurance Lead') === 'TECH');
+check('family: IT security assurance is tech', roleFamilyOf('IT Security Assurance Lead') === 'TECH');
 check('family: data scientist', roleFamilyOf('Data Scientist') === 'DATA');
-check('family: business analyst', roleFamilyOf('Business Analyst') === 'DATA');
+check('family: data analyst', roleFamilyOf('Data Analyst') === 'DATA');
+check('family: business analyst has its own family', roleFamilyOf('Business Analyst') === 'BUSINESS_ANALYST');
+check('family: systems analyst is a business analyst', roleFamilyOf('Senior Systems Analyst') === 'BUSINESS_ANALYST');
 check('family: finance', roleFamilyOf('Financial Analyst') === 'FINANCE');
 check('family: compliance', roleFamilyOf('Compliance Manager') === 'RISK_COMPLIANCE');
 check('family: project manager', roleFamilyOf('Project Executive') === 'PRODUCT');
 check('family: cargo supervisor is aviation', roleFamilyOf('Cargo Supervisor') === 'AVIATION_OPS');
 check('family: cabin crew is aviation', roleFamilyOf('Cabin Crew') === 'AVIATION_OPS');
+check('family: IT support is infra, not software', roleFamilyOf('IT Support Officer') === 'IT_INFRA');
 check('family: unknown title', roleFamilyOf('Chief of Staff') === 'OTHER');
 
 // AVIATION_OPS must win over TECH, or "Licensed Aircraft Engineer" reads as a
@@ -110,6 +130,13 @@ check(
   'family: title outranks department',
   roleFamilyOf('Cargo Supervisor', 'Digital & Information Technology') === 'AVIATION_OPS',
   roleFamilyOf('Cargo Supervisor', 'Digital & Information Technology'),
+);
+// The converse, and the reason DATA precedes AVIATION_OPS: an explicit analytical
+// title inside an operational division must stay analytical.
+check(
+  'family: "Data Analyst" in cargo is still DATA',
+  roleFamilyOf('Data Analyst – Cargo Performance', 'Airport & Cargo Operations') === 'DATA',
+  roleFamilyOf('Data Analyst – Cargo Performance', 'Airport & Cargo Operations'),
 );
 
 // ─── 3. scores ───────────────────────────────────────────────────────────────
@@ -137,19 +164,73 @@ for (const [title] of SHOULD_FILTER.filter(([t]) => blocklistHit(t) !== null)) {
   check(`blocklisted: "${title}" is exactly 0`, scoreRelevance({ title }).score === 0);
 }
 
-// ─── 4. seniority and YOE adjustments ────────────────────────────────────────
+// ─── 4. the three targets outrank everything else ────────────────────────────
+
+check('targets: exactly three families are named', TARGET_FAMILIES.length === 3, TARGET_FAMILIES);
+
+const targetScores = [
+  scoreRelevance({ title: 'Data Analyst' }).score,
+  scoreRelevance({ title: 'Business Analyst' }).score,
+  scoreRelevance({ title: 'Software Engineer' }).score,
+];
+for (const [index, score] of targetScores.entries()) {
+  check(`targets: #${index + 1} is in the "high" band`, relevanceBand(score) === 'high', score);
+}
+
+// Adjacent-but-not-target families must rank strictly below every target. This is
+// the assertion that catches a family weight being nudged above a target by
+// accident — the ranking is the whole product.
+const adjacentScores: Array<[string, number]> = [
+  ['Product Manager', scoreRelevance({ title: 'Product Manager' }).score],
+  ['Financial Analyst', scoreRelevance({ title: 'Financial Analyst' }).score],
+  ['Compliance Manager', scoreRelevance({ title: 'Compliance Manager' }).score],
+  ['IT Support Officer', scoreRelevance({ title: 'IT Support Officer' }).score],
+  ['Project Executive', scoreRelevance({ title: 'Project Executive' }).score],
+];
+const lowestTarget = Math.min(...targetScores);
+for (const [label, score] of adjacentScores) {
+  check(`targets: "${label}" ranks below every target`, score < lowestTarget, { score, lowestTarget });
+}
+
+// ─── 5. seniority, tuned for a 2-3 year candidate ────────────────────────────
 
 const baseTech = scoreRelevance({ title: 'Software Engineer' }).score;
-const directorTech = scoreRelevance({ title: 'Software Engineer', seniority: 'DIRECTOR' }).score;
-check('seniority: DIRECTOR lowers a tech score', directorTech < baseTech, { baseTech, directorTech });
+const baseData = scoreRelevance({ title: 'Data Analyst' }).score;
 
-const yoe10 = scoreRelevance({ title: 'Software Engineer', yoeMin: 10 }).score;
-const yoe15 = scoreRelevance({ title: 'Software Engineer', yoeMin: 15 }).score;
-check('yoe: 10+ costs more than 0', yoe10 < baseTech, { baseTech, yoe10 });
-check('yoe: 15+ costs more than 10+', yoe15 < yoe10, { yoe10, yoe15 });
+check('seniority: DIRECTOR lowers a tech score', scoreRelevance({ title: 'Software Engineer', seniority: 'DIRECTOR' }).score < baseTech);
+check('seniority: EXECUTIVE lowers it further', scoreRelevance({ title: 'Software Engineer', seniority: 'EXECUTIVE' }).score < scoreRelevance({ title: 'Software Engineer', seniority: 'DIRECTOR' }).score);
+check('seniority: LEAD is a stretch', scoreRelevance({ title: 'Software Engineer', seniority: 'LEAD' }).score < baseTech);
+check('seniority: MID is a better target than unlabelled', scoreRelevance({ title: 'Data Analyst', seniority: 'MID' }).score > baseData);
+check('seniority: JUNIOR is still in range', scoreRelevance({ title: 'Data Analyst', seniority: 'JUNIOR' }).score >= DEFAULT_MIN_RELEVANCE);
+// INTERN is the wrong career stage, so it is penalised rather than rewarded.
+check('seniority: INTERN is penalised', scoreRelevance({ title: 'Data Analyst', seniority: 'INTERN' }).score < baseData);
+check('seniority: LEAD costs more than MANAGER', scoreRelevance({ title: 'Software Engineer', seniority: 'LEAD' }).score < scoreRelevance({ title: 'Software Engineer', seniority: 'MANAGER' }).score);
+check('seniority: an unknown code is ignored', scoreRelevance({ title: 'Software Engineer', seniority: 'WIZARD' }).score === baseTech);
+
+// ─── 6. years of experience, around the 2-3 year band ────────────────────────
+
+check('yoe: target band is 2-3', TARGET_YOE_MIN === 2 && TARGET_YOE_MAX === 3);
+
+const at = (yoeMin: number): number => scoreRelevance({ title: 'Software Engineer', yoeMin }).score;
+
+check('yoe: both band values score identically', at(TARGET_YOE_MIN) === at(TARGET_YOE_MAX));
+check('yoe: the band beats a 1-year requirement', at(TARGET_YOE_MIN) > at(1));
+check('yoe: the band beats a 4-year requirement', at(TARGET_YOE_MAX) > at(4));
 check('yoe: null is ignored', scoreRelevance({ title: 'Software Engineer', yoeMin: null }).score === baseTech);
+check('yoe: undefined is ignored', scoreRelevance({ title: 'Software Engineer' }).score === baseTech);
 
-// ─── 5. invariants ───────────────────────────────────────────────────────────
+// Strictly decreasing above the band, so a more demanding posting never ranks
+// higher than a less demanding one.
+check('yoe: 4 > 6 > 9 > 13 in strict order', at(4) > at(6) && at(6) > at(9) && at(9) > at(13), {
+  y4: at(4),
+  y6: at(6),
+  y9: at(9),
+  y13: at(13),
+});
+// A perfect family match that wants 13+ years must still fall below the threshold.
+check('yoe: 13+ years hides even a software role', at(13) < DEFAULT_MIN_RELEVANCE, at(13));
+
+// ─── 7. invariants ───────────────────────────────────────────────────────────
 
 const everything = [...SHOULD_KEEP, ...SHOULD_FILTER];
 for (const [title, department] of everything) {
@@ -165,7 +246,7 @@ for (const [title, department] of everything) {
 
 check('empty title scores 0 with a reason', scoreRelevance({ title: '' }).reason === 'empty-title');
 
-// ─── 6. bands ────────────────────────────────────────────────────────────────
+// ─── 8. bands ────────────────────────────────────────────────────────────────
 
 check('band: 0 is filtered', relevanceBand(0) === 'filtered');
 check('band: 10 is low', relevanceBand(10) === 'low');
@@ -173,7 +254,7 @@ check('band: 35 is medium', relevanceBand(35) === 'medium');
 check('band: 70 is high', relevanceBand(70) === 'high');
 check('band: 100 is high', relevanceBand(100) === 'high');
 
-// ─── 7. determinism ──────────────────────────────────────────────────────────
+// ─── 9. determinism ──────────────────────────────────────────────────────────
 
 const first = scoreRelevance({ title: 'IT Security Assurance Lead', department: 'Digital & Information Technology' });
 const second = scoreRelevance({ title: 'IT Security Assurance Lead', department: 'Digital & Information Technology' });

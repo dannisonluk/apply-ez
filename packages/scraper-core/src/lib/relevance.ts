@@ -1,10 +1,26 @@
 /**
- * Deterministic job-relevance scoring.
+ * Deterministic job-relevance ("契合度") scoring.
  *
  * The problem this solves: a company careers site does not only list jobs you could
  * do. Cathay Pacific's board carries cabin crew, lounge ambassadors and cargo
  * supervisors alongside its IT roles; a bank carries branch tellers alongside its
  * analysts. Without a filter the app's new-job list is mostly noise.
+ *
+ * ## The profile this measures against
+ *
+ * Three role targets, at 2-3 years of experience:
+ *
+ *   - Data Analyst          -> `DATA`
+ *   - Business Analyst      -> `BUSINESS_ANALYST`
+ *   - Software Engineering  -> `TECH`
+ *
+ * Those three families sit at the top of `FAMILY_WEIGHT` and are the only ones
+ * `TARGET_FAMILIES` names. Everything else is graded relative to them: adjacent
+ * work (product, finance, risk) stays visible but ranks lower, and families that
+ * are almost never a fit (service, aviation ops) fall below the display threshold.
+ * `TARGET_YOE_MIN` / `TARGET_YOE_MAX` are what the years-of-experience adjustment
+ * is measured against, so "requires 8+ years" is penalised and "requires 2-3" is
+ * rewarded.
  *
  * Two design decisions worth stating up front:
  *
@@ -21,11 +37,18 @@
  * That is deliberate: adapter descriptions are frequently polluted with
  * page-level text (see the Cathay DOM fallback), so a description match would
  * score every job on the page identically.
+ *
+ * **No resume and no personal profile is ever involved.** The score is a pure
+ * function of the posting's title, department, seniority and stated minimum years
+ * of experience. That keeps it reproducible, free, and debuggable — and keeps the
+ * user's CV out of any third-party model.
  */
 
 export type RoleFamily =
-  | 'TECH'
+  | 'BUSINESS_ANALYST'
   | 'DATA'
+  | 'TECH'
+  | 'IT_INFRA'
   | 'PRODUCT'
   | 'DESIGN'
   | 'FINANCE'
@@ -40,25 +63,34 @@ export type RoleFamily =
   | 'SERVICE'
   | 'OTHER';
 
+/** The three role targets the score is optimised for. */
+export const TARGET_FAMILIES: readonly RoleFamily[] = ['BUSINESS_ANALYST', 'DATA', 'TECH'];
+
+/** The experience band the years-of-experience adjustment is measured against. */
+export const TARGET_YOE_MIN = 2;
+export const TARGET_YOE_MAX = 3;
+
 /**
  * How much each family moves the score away from the neutral 50.
  *
- * Positive: families that match a tech / data / business-analyst profile.
- * Negative: families that are almost never a fit, without being an outright
- * blocklist hit — a "Cargo Operations Manager" is a real white-collar job, it just
- * is not the job being looked for.
+ * Positive: families that match a data-analyst / business-analyst / software-
+ * engineering profile. Negative: families that are almost never a fit, without
+ * being an outright blocklist hit — a "Cargo Operations Manager" is a real
+ * white-collar job, it just is not the job being looked for.
  */
 const FAMILY_WEIGHT: Record<RoleFamily, number> = {
+  BUSINESS_ANALYST: 38,
+  DATA: 38,
   TECH: 35,
-  DATA: 35,
-  PRODUCT: 25,
-  FINANCE: 25,
-  RISK_COMPLIANCE: 20,
-  DESIGN: 15,
-  SALES: 10,
-  LEGAL: 5,
-  HR: 5,
-  MARKETING: 5,
+  PRODUCT: 20,
+  FINANCE: 12,
+  RISK_COMPLIANCE: 12,
+  IT_INFRA: 5,
+  DESIGN: 8,
+  LEGAL: 0,
+  HR: 0,
+  MARKETING: 0,
+  SALES: 0,
   OTHER: 0,
   OPERATIONS: -10,
   CUSTOMER_SERVICE: -25,
@@ -67,26 +99,40 @@ const FAMILY_WEIGHT: Record<RoleFamily, number> = {
 };
 
 /**
- * Ordered most-specific-first. First match wins, so `AVIATION_OPS` must precede
- * `TECH` — otherwise "Licensed Aircraft Engineer" reads as a software role because
- * of the word "engineer", and "Cargo Operations Analyst" reads as DATA.
+ * Ordered most-specific-first. First match wins.
+ *
+ * Three ordering constraints are load-bearing:
+ *   - `AVIATION_OPS` must precede `TECH`, or "Licensed Aircraft Engineer" reads as
+ *     a software role because of the word "engineer".
+ *   - `BUSINESS_ANALYST` and `DATA` must precede `AVIATION_OPS`, or a "Cargo Data
+ *     Analyst" is written off as a cargo job. The two rules are narrow enough that
+ *     this is safe: neither matches "Cargo Supervisor" or "Lounge Ambassador".
+ *   - `TECH` must precede `IT_INFRA`, so "Security Assurance" lands on the
+ *     engineering side while a bare "IT Support Officer" does not.
  */
 const FAMILY_RULES: Array<{ family: RoleFamily; re: RegExp }> = [
   {
-    family: 'AVIATION_OPS',
-    re: /\b(cabin\s+crew|flight\s+attendant|steward(?:ess)?|purser|pilot|first\s+officer|second\s+officer|flight\s+operations|inflight|in-flight|crew\s+(?:scheduling|control|roster)|airport|ground\s+(?:handling|services|operations|staff)|ramp\b|baggage|load\s+control|cargo|aircraft\s+(?:maintenance|engineer|technician)|line\s+maintenance|avionics|dispatch(?:er)?|aog\b|hangar|lounge\b|duty\s+free|catering\s+operations|dining\s+transformation)/i,
+    family: 'BUSINESS_ANALYST',
+    re: /\b(business\s+analyst|business\s+analysis|systems?\s+analyst|functional\s+analyst|process\s+analyst|requirements\s+analyst|business\s+(?:systems|process)\s+(?:analyst|specialist|manager|lead))\b/i,
   },
   {
     family: 'DATA',
-    re: /\b(data\s+(?:scientist|analyst|engineer|architect|governance|quality|management)|machine\s+learning|ml\s+(?:engineer|ops)|artificial\s+intelligence|analytics|business\s+intelligence|bi\s+(?:analyst|developer|specialist)|business\s+analyst|statistic(?:s|ian)|quantitative|actuar(?:y|ial)|econometric|insight\s+analyst|reporting\s+analyst)\b/i,
+    re: /\b(data\s+(?:scientist|science|analyst|analytics|engineer|engineering|architect|governance|quality|management|pipeline|warehouse|lake|integration)|machine\s+learning|ml\s+(?:engineer|ops)|artificial\s+intelligence|generative\s+ai|gen\s?ai|\bai\b|analytics|business\s+intelligence|bi\s+(?:analyst|developer|specialist)|statistic(?:s|ian)|quantitative|actuar(?:y|ial)|econometric|insight\s+analyst|reporting\s+analyst)\b/i,
+  },
+  {
+    family: 'AVIATION_OPS',
+    // `cargo` deliberately requires an operational context. Bare `cargo` also
+    // appears in insurance and trade-finance product names — AXA publishes
+    // "Underwriter, Marine Cargo", which is a finance role, not an airport one.
+    re: /\b(cabin\s+crew|flight\s+attendant|steward(?:ess)?|purser|pilot|first\s+officer|second\s+officer|flight\s+operations|inflight|in-flight|crew\s+(?:scheduling|control|roster)|airport|ground\s+(?:handling|services|operations|staff)|ramp\b|baggage|load\s+control|cargo\s+(?:operations?|operational|supervisor|handler|agent|distribution|terminal|services?|scheduling|control|loading|warehouse|import|export)|air\s+cargo|aircraft\s+(?:maintenance|engineer|technician)|line\s+maintenance|avionics|dispatch(?:er)?|aog\b|hangar|lounge\b|duty\s+free|catering\s+operations|dining\s+transformation)/i,
   },
   {
     family: 'TECH',
-    re: /\b(software|backend|back-end|frontend|front-end|full[- ]?stack|web\s+develop|application\s+develop|mobile\s+develop|devops|dev\s?ops|sre\b|site\s+reliability|platform\s+engineer|infrastructure|cloud\s+(?:engineer|architect|platform)|solution\s+(?:architect|lead)|system\s+architect|enterprise\s+architect|data\s+engineer|network\s+(?:engineer|architect|specialist)|system\s+administrator|sysadmin|database\s+administrator|dba\b|cyber\s*security|infosec|information\s+security|security\s+(?:assurance|engineer|architect|analyst)|penetration\s+test|ethical\s+hack|information\s+technology|\bit\s+(?:security|audit|support|officer|specialist|manager|engineer|architect|analyst)|agile\s+(?:coach|transformation|lead)|scrum\s+master|technical\s+(?:lead|programme|manager|architect|analyst)|software\s+engineer|qa\s+(?:engineer|analyst|lead)|test\s+(?:engineer|automation)|programmer|developer|engineering\s+manager|digital\s+(?:transformation|product|platform|innovation|lead))\b/i,
+    re: /\b(software|backend|back-end|frontend|front-end|full[- ]?stack|web\s+develop|application\s+develop|mobile\s+develop|devops|dev\s?ops|sre\b|site\s+reliability|platform\s+(?:engineer|architect|lead|owner|manager)|cloud\s+(?:engineer|architect|platform)|solution\s+lead|(?:solution|system|enterprise|functional|technical|application|integration|platform|cloud|security|data)\s+architect|data\s+engineer|database\s+administrator|dba\b|cyber\s*security|infosec|information\s+security|security\s+(?:assurance|engineer|architect)|penetration\s+test|ethical\s+hack|agile\s+(?:coach|transformation|lead)|scrum\s+master|technical\s+(?:lead|programme|manager|architect|analyst)|software\s+engineer|qa\s+(?:engineer|analyst|lead)|test\s+(?:engineer|automation)|programmer|developer|engineering\s+manager|digital\s+(?:transformation|product|platform|innovation|lead))\b/i,
   },
   {
     family: 'PRODUCT',
-    re: /\b(product\s+(?:manager|owner|management|lead|specialist|designer)|programme?\s+manager|program\s+manager|pmo\b|project\s+(?:manager|management|lead|executive|officer|coordinator)|portfolio\s+manager|delivery\s+manager)\b/i,
+    re: /\b(product\s+(?:manager|owner|management|lead|specialist|designer|officer|executive|analyst)|programme?\s+manager|program\s+manager|pmo\b|project\s+(?:manager|management|lead|executive|officer|coordinator)|portfolio\s+manager|delivery\s+(?:manager|lead))\b/i,
   },
   {
     family: 'DESIGN',
@@ -119,6 +165,10 @@ const FAMILY_RULES: Array<{ family: RoleFamily; re: RegExp }> = [
   {
     family: 'CUSTOMER_SERVICE',
     re: /\b(customer\s+(?:service|support|success|experience|care|relations)|contact\s+cent(?:re|er)|call\s+cent(?:re|er)|service\s+desk|help\s?desk|guest\s+(?:services|relations|experience)|front\s+(?:desk|office)|receptionist|client\s+services?)\b/i,
+  },
+  {
+    family: 'IT_INFRA',
+    re: /\b(information\s+technology|\bit\s+(?:security|audit|support|officer|specialist|manager|engineer|architect|analyst)|network\s+(?:engineer|architect|specialist)|system\s+administrator|sysadmin|infrastructure|technical\s+support|desktop\s+support|end\s+user\s+computing)\b/i,
   },
   {
     family: 'OPERATIONS',
@@ -161,24 +211,55 @@ export interface RelevanceInput {
 }
 
 export interface RelevanceResult {
-  /** 0-100. Higher is a better fit for a tech / data / business-analyst profile. */
+  /** 0-100. Higher is a better fit for the target profile above. */
   score: number;
   family: RoleFamily;
   /** Why the score is what it is. `null` when nothing moved the score. */
   reason: string | null;
 }
 
-/** Neutral starting point before family and seniority adjustments. */
+/** Neutral starting point before family, seniority and YOE adjustments. */
 const BASE_SCORE = 50;
 
 /** Below this, the app hides a job unless the user asks to see filtered results. */
 export const DEFAULT_MIN_RELEVANCE = 35;
 
-const SENIORITY_PENALTY: Record<string, number> = {
-  DIRECTOR: -10,
-  EXECUTIVE: -15,
-  MANAGER: -5,
+/**
+ * Seniority adjustment, tuned for someone with 2-3 years of experience.
+ *
+ * The positive entries are not a typo: a `MID` posting is a better target than an
+ * unlabelled one, and a `JUNIOR` one is still in range. The negatives are what
+ * matter — a `LEAD` or `MANAGER` posting is a stretch, and `INTERN` is the wrong
+ * stage of career entirely, which is why it is penalised rather than rewarded.
+ */
+const SENIORITY_DELTA: Record<string, number> = {
+  INTERN: -15,
+  ENTRY: -6,
+  JUNIOR: 4,
+  MID: 8,
+  SENIOR: -10,
+  LEAD: -18,
+  MANAGER: -12,
+  DIRECTOR: -28,
+  EXECUTIVE: -35,
 };
+
+/**
+ * Years-of-experience adjustment around the 2-3 year target band.
+ *
+ * A posting asking for less than you have is not a problem (you clear the bar), so
+ * `<2` is mildly positive rather than negative. Everything above the band is
+ * penalised by distance, and 13+ is severe enough to push even a perfect family
+ * match below the display threshold.
+ */
+function yoeAdjustment(yoeMin: number): { delta: number; label: string } {
+  if (yoeMin < TARGET_YOE_MIN) return { delta: 5, label: 'yoe<2' };
+  if (yoeMin <= TARGET_YOE_MAX) return { delta: 8, label: 'yoe-in-band' };
+  if (yoeMin <= 5) return { delta: -8, label: 'yoe-4-5' };
+  if (yoeMin <= 8) return { delta: -20, label: 'yoe-6-8' };
+  if (yoeMin <= 12) return { delta: -38, label: 'yoe-9-12' };
+  return { delta: -60, label: 'yoe-13plus' };
+}
 
 function text(value: unknown): string {
   return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
@@ -252,24 +333,17 @@ export function scoreRelevance(input: RelevanceInput): RelevanceResult {
   const reasons: string[] = [`family:${family}`];
 
   const seniority = text(input.seniority).toUpperCase();
-  const seniorityPenalty = SENIORITY_PENALTY[seniority];
-  if (seniorityPenalty !== undefined) {
-    score += seniorityPenalty;
+  const seniorityDelta = SENIORITY_DELTA[seniority];
+  if (seniorityDelta !== undefined) {
+    score += seniorityDelta;
     reasons.push(`seniority:${seniority}`);
   }
 
-  // Very senior postings are a stretch rather than a match. The bands are wide on
-  // purpose: a 10-year requirement is normal for a lead role and should not be
-  // punished the same way a 20-year one is.
   const yoe = input.yoeMin;
   if (typeof yoe === 'number' && Number.isFinite(yoe)) {
-    if (yoe >= 15) {
-      score -= 20;
-      reasons.push(`yoe>=15`);
-    } else if (yoe >= 10) {
-      score -= 10;
-      reasons.push(`yoe>=10`);
-    }
+    const adjustment = yoeAdjustment(yoe);
+    score += adjustment.delta;
+    reasons.push(adjustment.label);
   }
 
   const clamped = Math.max(0, Math.min(100, score));

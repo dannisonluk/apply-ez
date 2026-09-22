@@ -16,6 +16,7 @@
     "probe:cathay": "tsx scripts/probe-cathay.ts",
     "probe:target": "tsx scripts/probe-target.ts",
     "probe:robots": "tsx scripts/probe-robots.ts",
+    "why:filtered": "tsx scripts/why-filtered.ts",
     "check": "tsx scripts/check-backfill.ts && tsx scripts/check-hk-time.ts && tsx scripts/check-relevance.ts && tsx scripts/check-llm.ts && tsx scripts/check-push.ts && tsx scripts/check-store.ts && tsx scripts/check-http.ts && tsx scripts/check-workday.ts && tsx scripts/check-platform-adapters.ts",
     "check:backfill": "tsx scripts/check-backfill.ts",
     "check:hk-time": "tsx scripts/check-hk-time.ts",

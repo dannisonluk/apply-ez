@@ -117,7 +117,7 @@ Security is enabled on the Expo project.
 
 ## Pipeline order
 
-Order matters here — two steps depend on running before another one:
+Order matters here, and the ordering is load-bearing in three places:
 
 ```
 adapter.scrape()
@@ -126,11 +126,49 @@ adapter.scrape()
   → enrichJobsWithSummary()  deterministic classification/tags
   → standardizeJobs()
   → applyRelevance()         role family + 0-100 score, on the finalised rows
+  → store.upsertJobs()       ── ingest is complete here ──
+  → notifyNewJobs()
   → enrichJobs()             LLM; reads the RAW jobs, since `description` is gone by now
   → applyRelevance() again   re-scored with the model's seniority / YOE reading
-  → store.upsertJobs()
-  → notifyNewJobs()
+  → store.applyEnrichment()  patches the summary and refined score onto existing rows
 ```
+
+**The database write comes before the LLM stage, deliberately.** Enrichment is the
+slowest and least reliable step in a run — a free-tier model can be rate-limited,
+geo-blocked, or absent entirely — and a 4-hourly ingest must never be held up by
+it. Rows land with `enrich_status = 'PENDING'` and are patched afterwards; anything
+the model did not reach stays `PENDING` and is retried on the next run, which is
+already how the retry mechanism worked. The `jobs written` log line is emitted
+before the first LLM call so the log alone proves the invariant.
+
+## Relevance scoring
+
+Every posting is scored 0-100 against one profile, in `src/lib/relevance.ts`:
+
+| | |
+| --- | --- |
+| Role targets | **Data Analyst** (`DATA`), **Business Analyst** (`BUSINESS_ANALYST`), **Software Engineering** (`TECH`) |
+| Experience | **2–3 years** (`TARGET_YOE_MIN` / `TARGET_YOE_MAX`) |
+
+The three target families sit at the top of `FAMILY_WEIGHT`; adjacent work (product,
+finance, risk) stays visible but ranks lower, and families that are almost never a
+fit (service, aviation ops) fall below the display threshold. Years of experience is
+measured as a distance from the 2–3 year band, so a posting asking for 13+ years is
+hidden even when the family is a perfect match.
+
+The score is a pure function of the posting's title, department, seniority and
+stated minimum experience. **No resume, CV, or profile data is involved** — which
+keeps it reproducible, free, debuggable, and keeps the user's documents out of any
+third-party model.
+
+Tuning is done against live boards rather than guesses:
+
+```
+pnpm --filter @apply-ez/scraper-core why:filtered axa
+```
+
+That scrapes a target, scores every posting, and prints the hidden ones with the
+exact reason string, so a rule can be judged on real titles.
 
 `src/lib/llm/` holds the enrichment layer:
 
@@ -467,7 +505,7 @@ Two things generalise from this:
 Run the regression checks:
 
 ```bash
-pnpm --filter @apply-ez/scraper-core check           # all nine suites, 534 assertions
+pnpm --filter @apply-ez/scraper-core check           # all nine suites, 591 assertions
 pnpm --filter @apply-ez/scraper-core check:backfill  # 40
 pnpm --filter @apply-ez/scraper-core check:hk-time   # 51
 pnpm --filter @apply-ez/scraper-core check:relevance # 148

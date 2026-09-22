@@ -34,15 +34,45 @@ export interface UpsertJobsResult {
 
 export interface UpsertJobsOptions {
   /**
-   * LLM enrichment results keyed by `externalId`. Jobs with no entry are written
-   * with `enrich_status = 'PENDING'` so a later run can pick them up.
-   */
-  insights?: Map<string, StoredInsight> | undefined;
-  /**
    * Pre-computed existing-id set. The caller usually needs this anyway (to decide
    * which jobs to enrich), so passing it in avoids a second round trip.
    */
   existingExternalIds?: Set<string> | undefined;
+}
+
+export interface ApplyEnrichmentInput {
+  companyId: string;
+  source: string;
+  /** Results keyed by `externalId`. Absent means "leave the row at PENDING". */
+  insights: Map<string, StoredInsight>;
+  /**
+   * The finalized rows written by this run. Supplied so the LLM-refined relevance
+   * score can be patched in the same request as the summary: the model has read
+   * the posting, so its seniority / years-of-experience reading beats the
+   * deterministic title heuristics. Omit to leave relevance untouched.
+   */
+  jobs?: JobIngest[] | undefined;
+}
+
+/**
+ * The `jobs.extracted` JSONB shape.
+ *
+ * One definition, shared by the two writers of enrichment columns, so the JSON key
+ * names cannot drift between an initial write and a backfill.
+ */
+function buildExtracted(insight: StoredInsight): Record<string, unknown> {
+  return {
+    seniority: insight.seniority ?? null,
+    yoeMin: insight.yoeMin ?? null,
+    yoeMax: insight.yoeMax ?? null,
+    deadline: insight.deadline ?? null,
+    employmentType: insight.employmentType ?? null,
+    workArrangement: insight.workArrangement ?? null,
+    skills: insight.skills,
+    responsibilities: insight.responsibilities ?? [],
+    flags: insight.flags,
+    usedFallback: insight.usedFallback,
+  };
 }
 
 export interface ReconcileInput {
@@ -207,10 +237,17 @@ export class JobStore {
   }
 
   /**
-   * Upsert jobs and report how many were genuinely new.
+   * Write this run's jobs and report how many were genuinely new.
    *
    * `first_seen_at` is intentionally absent from the payload so conflict updates
    * preserve it.
+   *
+   * Enrichment columns are deliberately NOT written here. Every row lands with the
+   * schema default `enrich_status = 'PENDING'`, and `applyEnrichment` fills them in
+   * afterwards. That ordering is the point: the LLM stage is the slowest and least
+   * reliable part of a run, and it must not be able to delay — let alone block —
+   * the ingest. If the model is rate-limited, geo-blocked or simply switched off,
+   * the postings are already in the database and the app can show them.
    */
   async upsertJobs(
     companyId: string,
@@ -222,15 +259,12 @@ export class JobStore {
 
     const existing =
       options.existingExternalIds ?? (await this.listExistingExternalIds(companyId, source));
-    const insights = options.insights;
     const newExternalIds: string[] = [];
     const rows: Array<Record<string, unknown>> = [];
 
     for (const job of jobs) {
       const isNew = !existing.has(job.externalId);
       if (isNew) newExternalIds.push(job.externalId);
-
-      const insight = insights?.get(job.externalId);
 
       rows.push({
         company_id: companyId,
@@ -264,30 +298,6 @@ export class JobStore {
         last_seen_at: new Date().toISOString(),
         // Reappearing jobs come back to ACTIVE; EXPIRED is only set by reconcile.
         status: 'ACTIVE',
-        // ── LLM enrichment ──────────────────────────────────────────────────
-        // Omitted entirely when there is no insight, so the DB default
-        // ('PENDING') survives and a later run can still enrich this job.
-        ...(insight
-          ? {
-              summary: insight.summary,
-              summary_lang: insight.summaryLang,
-              extracted: {
-                seniority: insight.seniority ?? null,
-                yoeMin: insight.yoeMin ?? null,
-                yoeMax: insight.yoeMax ?? null,
-                deadline: insight.deadline ?? null,
-                employmentType: insight.employmentType ?? null,
-                workArrangement: insight.workArrangement ?? null,
-                skills: insight.skills,
-                responsibilities: insight.responsibilities ?? [],
-                flags: insight.flags,
-                usedFallback: insight.usedFallback,
-              },
-              enrich_status: 'OK',
-              enrich_model: insight.model,
-              enriched_at: new Date().toISOString(),
-            }
-          : {}),
       });
     }
 
@@ -305,6 +315,61 @@ export class JobStore {
       updated: jobs.length - newExternalIds.length,
       newExternalIds,
     };
+  }
+
+  /**
+   * Attach LLM results to rows that are already in the database.
+   *
+   * This runs AFTER `upsertJobs`, never before it — see the note there. Rows not
+   * present in `insights` are left at `enrich_status = 'PENDING'`, which is what
+   * makes the next run retry them (see `listEnrichmentPendingIds`).
+   *
+   * One PATCH per job rather than a bulk update: PostgREST cannot apply different
+   * values to different rows in a single statement. The volume is bounded by the
+   * per-run enrichment cap, so this stays in the tens of requests.
+   *
+   * Returns the number of rows patched.
+   */
+  async applyEnrichment(input: ApplyEnrichmentInput): Promise<number> {
+    if (input.insights.size === 0) return 0;
+
+    // Only the jobs enriched this run need patching, and only those carry a
+    // relevance score refined by the model's reading of the posting.
+    const byExternalId = new Map<string, JobIngest>();
+    for (const job of input.jobs ?? []) byExternalId.set(job.externalId, job);
+
+    const enrichedAt = new Date().toISOString();
+    let patched = 0;
+
+    for (const [externalId, insight] of input.insights) {
+      const job = byExternalId.get(externalId);
+      const relevance = job
+        ? {
+            relevance_score: job.relevanceScore ?? 50,
+            role_family: job.roleFamily ?? null,
+            filter_reason: job.filterReason ?? null,
+          }
+        : {};
+
+      await this.send('PATCH', '/jobs', {
+        body: {
+          summary: insight.summary,
+          summary_lang: insight.summaryLang,
+          extracted: buildExtracted(insight),
+          enrich_status: 'OK',
+          enrich_model: insight.model,
+          enriched_at: enrichedAt,
+          ...relevance,
+        },
+        prefer: 'return=minimal',
+        query:
+          `source=eq.${input.source}&external_id=eq.${encodeURIComponent(externalId)}` +
+          `&company_id=eq.${input.companyId}`,
+      });
+      patched += 1;
+    }
+
+    return patched;
   }
 
   /**

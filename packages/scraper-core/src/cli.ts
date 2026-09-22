@@ -320,28 +320,60 @@ async function runTarget(
     careersUrl: target.entryUrls[0] ?? '',
   });
 
-  // Enrichment must read the RAW jobs: `prepareJobsForIngest` has already stripped
-  // `description` by this point, and the JD text is the whole input to the prompt.
   const existingExternalIds = await store.listExistingExternalIds(companyId, JOB_SOURCE);
-  let insights: Map<string, StoredInsight> | undefined;
+
+  // ── Write first, enrich second ──────────────────────────────────────────────
+  // The database write deliberately happens BEFORE the LLM stage. Enrichment is
+  // the slowest and least reliable step of a run — a free-tier model can be rate
+  // limited, geo-blocked or simply absent — and a 4-hourly ingest must never be
+  // held up by it. Rows land with `enrich_status = 'PENDING'` and are patched in
+  // below; anything the model did not reach stays PENDING and is retried on the
+  // next run, which is already how the retry mechanism works.
+  const upserted = await store.upsertJobs(companyId, JOB_SOURCE, jobs, { existingExternalIds });
+  result.inserted = upserted.inserted;
+  result.updated = upserted.updated;
+
+  // Logged explicitly, and before the LLM stage starts, so the log alone proves the
+  // ingest is not waiting on a model. Worth having: this is the invariant that a
+  // future reorder would silently break.
+  targetLogger.info(
+    { inserted: upserted.inserted, updated: upserted.updated, total: jobs.length },
+    'jobs written',
+  );
+
+  if (upserted.newExternalIds.length > 0) {
+    targetLogger.info({ newJobs: upserted.newExternalIds.length }, 'new jobs found');
+
+    // Notify as soon as the write succeeds. The notice carries only titles and the
+    // company name, so there is nothing to gain by waiting for a summary — and a
+    // device is still never told about a job that failed to persist.
+    const notified = await notifyNewJobs({
+      store,
+      jobs,
+      newExternalIds: upserted.newExternalIds,
+      logger: targetLogger,
+    });
+    if (notified) result.pushed = notified.accepted;
+  }
 
   if (options.enrich) {
     const enrichOptions = defaultEnrichOptions(targetLogger);
     if (!enrichOptions) {
       targetLogger.warn('OPENROUTER_API_KEY is not set — skipping LLM enrichment');
     } else {
+      // Enrichment reads the RAW jobs: `prepareJobsForIngest` has already stripped
+      // `description`, and the JD text is the whole input to the prompt.
       const pending = await store.listEnrichmentPendingIds(companyId, JOB_SOURCE);
       // Summarise what is new, and retry what previously failed. Everything else
       // is left untouched so the daily quota is spent only on unseen postings.
       const alreadySummarised = new Set(
         [...existingExternalIds].filter((externalId) => !pending.has(externalId)),
       );
-      const { insights: produced, stats } = await enrichJobs(
+      const { insights, stats } = await enrichJobs(
         backfilled.jobs,
         alreadySummarised,
         enrichOptions,
       );
-      insights = produced;
       result.enriched = stats.succeeded;
       result.enrichFailed = stats.failed;
       result.enrichSkipped =
@@ -349,8 +381,8 @@ async function runTarget(
 
       // Re-score using the model's seniority / years-of-experience, which beat the
       // deterministic title heuristics because the model actually read the JD.
-      if (produced.size > 0) {
-        const refined = applyRelevance(jobs, produced);
+      if (insights.size > 0) {
+        const refined = applyRelevance(jobs, insights);
         result.relevance = refined;
         targetLogger.info(
           {
@@ -361,29 +393,16 @@ async function runTarget(
           },
           'relevance re-scored with LLM signals',
         );
+
+        const patched = await store.applyEnrichment({
+          companyId,
+          source: JOB_SOURCE,
+          insights,
+          jobs,
+        });
+        targetLogger.info({ patched, failed: stats.failed }, 'enrichment written');
       }
     }
-  }
-
-  const upserted = await store.upsertJobs(companyId, JOB_SOURCE, jobs, {
-    existingExternalIds,
-    ...(insights ? { insights } : {}),
-  });
-  result.inserted = upserted.inserted;
-  result.updated = upserted.updated;
-
-  if (upserted.newExternalIds.length > 0) {
-    targetLogger.info({ newJobs: upserted.newExternalIds.length }, 'new jobs found');
-
-    // Notify after the write succeeds, so a device is never told about a job that
-    // failed to persist.
-    const notified = await notifyNewJobs({
-      store,
-      jobs,
-      newExternalIds: upserted.newExternalIds,
-      logger: targetLogger,
-    });
-    if (notified) result.pushed = notified.accepted;
   }
 
   if (options.full && config.reconcileMissingJobs === true) {

@@ -14,13 +14,15 @@
     "scrape:dry": "tsx src/cli.ts --dry-run",
     "sync:codes": "tsx scripts/sync-codes.ts",
     "probe:cathay": "tsx scripts/probe-cathay.ts",
-    "check": "tsx scripts/check-backfill.ts && tsx scripts/check-hk-time.ts && tsx scripts/check-relevance.ts && tsx scripts/check-llm.ts && tsx scripts/check-push.ts && tsx scripts/check-store.ts",
+    "probe:workday": "tsx scripts/probe-workday.ts",
+    "check": "tsx scripts/check-backfill.ts && tsx scripts/check-hk-time.ts && tsx scripts/check-relevance.ts && tsx scripts/check-llm.ts && tsx scripts/check-push.ts && tsx scripts/check-store.ts && tsx scripts/check-workday.ts",
     "check:backfill": "tsx scripts/check-backfill.ts",
     "check:hk-time": "tsx scripts/check-hk-time.ts",
     "check:relevance": "tsx scripts/check-relevance.ts",
     "check:llm": "tsx scripts/check-llm.ts",
     "check:push": "tsx scripts/check-push.ts",
-    "check:store": "tsx scripts/check-store.ts"
+    "check:store": "tsx scripts/check-store.ts",
+    "check:workday": "tsx scripts/check-workday.ts"
   },
   "dependencies": {
     "bottleneck": "^2.19.5",

@@ -50,7 +50,10 @@ export const SCRAPE_TARGETS: ScrapeTarget[] = [
   {
     id: 'aia',
     name: 'AIA Hong Kong Careers',
-    adapter: 'aia',
+    // Reads Workday's public CXS JSON API — no browser. The previous `aia`
+    // adapter drove Playwright through the same data, which is why it was slow
+    // and why `applicationDeadline` was never populated.
+    adapter: 'workday',
     companyName: 'AIA',
     companySlug: 'aia',
     companyDomain: 'aia.com',
@@ -61,7 +64,11 @@ export const SCRAPE_TARGETS: ScrapeTarget[] = [
     config: {
       companyName: 'AIA',
       companyDomain: 'aia.com',
-      maxPages: 5,
+      // 20 per page (Workday's cap), and AIA has ~116 HK postings.
+      maxPages: 8,
+      maxJobs: 400,
+      includeDetailPages: true,
+      maxDetailJobs: 200,
       reconcileMissingJobs: true,
       locationCountry: 'd4afdeb461d446e4babd204bd102dba8',
       locale: 'en',
@@ -91,7 +98,8 @@ export const SCRAPE_TARGETS: ScrapeTarget[] = [
   {
     id: 'manulife',
     name: 'Manulife Hong Kong Careers',
-    adapter: 'manulife',
+    // Same Workday CXS API as AIA — see the note on the AIA target.
+    adapter: 'workday',
     companyName: 'Manulife',
     companySlug: 'manulife',
     companyDomain: 'manulife.com',
@@ -100,8 +108,10 @@ export const SCRAPE_TARGETS: ScrapeTarget[] = [
     config: {
       companyName: 'Manulife',
       companyDomain: 'manulife.com',
-      maxPages: 8,
-      maxJobs: 80,
+      maxPages: 12,
+      maxJobs: 400,
+      includeDetailPages: true,
+      maxDetailJobs: 200,
       reconcileMissingJobs: true,
       locationCountry: 'd4afdeb461d446e4babd204bd102dba8',
       locationCountryFacet: 'Location_Country',

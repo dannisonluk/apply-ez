@@ -1,48 +1,22 @@
 /**
- * Text and HTML utilities shared by the Cathay adapter.
+ * Cathay-specific text helpers.
  *
- * These helpers intentionally stay framework-free so listing APIs, Playwright
- * detail pages, and static HTML fallbacks all normalize text in the same way.
+ * The generic normalisation now lives in `src/lib/text.ts` so every adapter
+ * produces identical text for the same HTML; these re-exports keep the module's
+ * public API stable for existing callers. What stays here is the Cathay-only
+ * extraction (tag text, list items, bullet joining).
  */
-export function normalizeText(value: string | undefined | null): string {
-  return value?.replace(/\s+/g, ' ').trim() ?? '';
-}
+export {
+  normalizeText,
+  toAbsoluteUrl,
+  decodeHtmlEntities,
+  stripHtmlToText,
+} from '../../lib/text.js';
 
-export function toAbsoluteUrl(rawUrl: string, pageUrl: string): string {
-  try {
-    return rawUrl.startsWith('http') ? new URL(rawUrl).toString() : new URL(rawUrl, pageUrl).toString();
-  } catch {
-    return rawUrl;
-  }
-}
-
-export function decodeHtmlEntities(value: string): string {
-  return value
-    .replace(/&#(\d+);/g, (_match, code) => String.fromCodePoint(Number.parseInt(code, 10)))
-    .replace(/&#x([0-9a-f]+);/gi, (_match, code) => String.fromCodePoint(Number.parseInt(code, 16)))
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'");
-}
-
-export function stripHtmlToText(html: string): string {
-  const withLineBreaks = html
-    .replace(/<script\b[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style\b[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<noscript\b[\s\S]*?<\/noscript>/gi, ' ')
-    .replace(/<(br|\/p|\/div|\/li|\/section|\/article|\/tr|\/h[1-6]|\/main|\/header|\/footer)\b[^>]*>/gi, '\n')
-    .replace(/<[^>]+>/g, ' ');
-
-  return decodeHtmlEntities(withLineBreaks)
-    .replace(/\r/g, '')
-    .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n[ \t]+/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
+// Re-exporting does not bring a name into this module's own scope, and the
+// Cathay-only helpers below still call these directly — so they are imported as
+// well as re-exported.
+import { normalizeText, stripHtmlToText } from '../../lib/text.js';
 
 export function extractTagText(html: string, tagName: string): string | undefined {
   const match = html.match(new RegExp(`<${tagName}\\b[^>]*>([\\s\\S]*?)<\\/${tagName}>`, 'i'));

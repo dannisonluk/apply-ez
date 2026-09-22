@@ -11,6 +11,7 @@ import { AXAAdapter } from './axa.adapter.js';
 import { ManulifeAdapter } from './manulife.adapter.js';
 import { HSBCAdapter } from './hsbc.adapter.js';
 import { CorporateCareersAdapter } from './corporate-careers.adapter.js';
+import { WorkdayAdapter } from './workday.adapter.js';
 
 const adapters: Record<string, ScraperAdapter> = {
   cathaypacific: new CathayPacificAdapter(),
@@ -25,6 +26,9 @@ const adapters: Record<string, ScraperAdapter> = {
   manulife: new ManulifeAdapter(),
   hsbc: new HSBCAdapter(),
   'corporate-careers': new CorporateCareersAdapter(),
+  // Reads Workday's public CXS JSON API — no browser. Prefer this over the
+  // per-tenant Playwright adapters above for any `*.myworkdayjobs.com` site.
+  workday: new WorkdayAdapter(),
 };
 
 export function getAdapter(name: string): ScraperAdapter | undefined {

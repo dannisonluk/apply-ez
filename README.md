@@ -326,6 +326,53 @@ Read as *adapter alone → after backfill*.
   it. The AIA adapter sets it directly, which is why backfill has nothing to do there.
 - `location` is 0 filled on both because the adapters already provide it.
 
+### Prefer the structured source, then the DOM, then the model
+
+When an adapter misses fields the instinct is to throw an LLM at the problem. Before
+doing that it is worth checking whether the site already publishes the same data
+machine-readably — because a JSON endpoint is exact, free, instant, and gives fields
+the rendered DOM never exposes.
+
+Auditing the targets for a structured source turned up three kinds:
+
+| Target | Structured source | Notes |
+|---|---|---|
+| AIA, Manulife | Workday CXS JSON API | `POST /wday/cxs/{tenant}/{site}/jobs`, detail per posting |
+| HSBC | Eightfold `GET /api/apply/v2/jobs` | ~247 HK postings, full description per position |
+| AXA | Phenom `GET /api/jobs` | full description, `posted_date`, `apply_url` |
+| Cathay | none | server-rendered, no JSON-LD, no XHR — DOM scraping is the only option |
+
+`workday.adapter.ts` is the first one built. It replaces a headless browser with two
+plain HTTP calls and, on the live boards, produces:
+
+```
+AIA        116 jobs  location 116/116  description 116/116  deadline  19/116   24s
+Manulife    75 jobs  location  75/75   description  75/75   deadline  75/75   14s
+```
+
+The deadline is the notable one. It comes from `jobPostingInfo.endDate`, which the
+rendered page never shows — the Cathay adapter needed an entire detail stage to
+recover 41/45 by parsing prose, and the Workday sites could not recover it at all.
+
+Three behaviours of that API are worth knowing, because each one fails silently:
+
+- **Only page 0 returns a real `total`.** Every later page reports `total: 0`.
+  Assigning it unconditionally clobbers the good value with a zero — which stopped
+  the first AIA crawl after two pages and collected 40 jobs out of 116 *while
+  reporting success*.
+- **Past the last page it wraps around** and re-serves page 1 rather than returning
+  an empty batch, so "empty batch" is not a usable stop signal. The loop stops on
+  "this page contributed nothing new" instead, which holds even if `total` is wrong.
+- **The facet parameter name differs per tenant.** AIA uses `locationCountry`,
+  Manulife uses `Location_Country`. Sending the wrong key is not ignored — Workday
+  answers `400` and the listing comes back empty.
+
+The general rule this suggests, and what the adapters now follow: fetch the page or
+endpoint once, keep the raw text, and let progressively more expensive parsers try to
+structure it. A model is the last tier, not the first — and it can only extract what
+the fetcher actually retrieved, so a fetch that returns nothing cannot be rescued by
+a better prompt.
+
 ### The Cathay adapter, as a worked example
 
 Cathay is the case that shows why "the field is populated" is not the same as "the
@@ -368,13 +415,14 @@ Two things generalise from this:
 Run the regression checks:
 
 ```bash
-pnpm --filter @apply-ez/scraper-core check           # all six suites, 382 assertions
+pnpm --filter @apply-ez/scraper-core check           # all seven suites, 433 assertions
 pnpm --filter @apply-ez/scraper-core check:backfill  # 40
 pnpm --filter @apply-ez/scraper-core check:hk-time   # 51
 pnpm --filter @apply-ez/scraper-core check:relevance # 148
 pnpm --filter @apply-ez/scraper-core check:llm       # 91
 pnpm --filter @apply-ez/scraper-core check:push      # 33
 pnpm --filter @apply-ez/scraper-core check:store     # 19
+pnpm --filter @apply-ez/scraper-core check:workday   # 51
 
 pnpm check:sql                                       # migrations, 46 assertions
 
@@ -393,6 +441,12 @@ both directions — it must fire on `PGRST202`/`PGRST204`/`PGRST205`/`42703`, an
 *not* fire on a `23505` unique violation, a `23514` CHECK violation, a `42501` RLS
 denial, or a 5xx. A false positive there would send you to re-apply a migration that
 is already live.
+
+`check:workday` runs the adapter against a local mock CXS server that deliberately
+reproduces the two behaviours that broke the first live run — `total: 0` on later
+pages, and wrap-around past the last page. Those are exactly the failures a
+happy-path test would miss, so the mock reimplements them rather than serving a
+tidy paginated list.
 
 `check:relevance` uses **real Cathay Pacific Hong Kong job titles** as fixtures,
 taken from the live board. That matters: the layer's whole job is how it behaves on

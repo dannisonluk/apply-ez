@@ -129,17 +129,30 @@ const JOB_SELECT = [
  * rather than making them vanish, which is the only way to tell "this posting
  * closed" apart from "this posting was never scraped".
  *
- * Ordering is `status` first so ACTIVE sorts before EXPIRED, which guarantees a
- * large expired backlog can never push live postings past the row limit.
+ * Two queries, one per status, rather than one query ordered by status. A single
+ * `order=status.asc&limit=N` request looks equivalent and is not: ACTIVE sorts
+ * first, so as soon as the active board exceeds N the limit is consumed entirely
+ * by active rows and the Closed tab is *permanently* empty. That is already the
+ * case — the board passed 400 active rows on 2026-09-22 (746 rows), and the
+ * response was 400 ACTIVE / 0 EXPIRED — so the first posting the reconcile
+ * retires would have been invisible, which is the exact outcome this tab exists
+ * to prevent. Giving each status its own budget removes the coupling.
+ *
+ * Within each status the order is newest-first, so the active list leads with the
+ * postings that just appeared.
  */
 export async function fetchJobs(limit = 400): Promise<JobRow[]> {
-  const rows = await rest<JobRow[]>('/jobs', {
-    query:
-      `select=${JOB_SELECT}` +
-      `&order=status.asc,first_seen_at.desc` +
-      `&limit=${limit}`,
-  });
-  return rows ?? [];
+  const [active, expired] = await Promise.all([
+    rest<JobRow[]>('/jobs', {
+      query: `select=${JOB_SELECT}&status=eq.ACTIVE&order=first_seen_at.desc&limit=${limit}`,
+    }),
+    rest<JobRow[]>('/jobs', {
+      query: `select=${JOB_SELECT}&status=eq.EXPIRED&order=first_seen_at.desc&limit=${limit}`,
+    }),
+  ]);
+  // Active first, preserving the previous ordering, so the list still opens on
+  // live postings.
+  return [...(active ?? []), ...(expired ?? [])];
 }
 
 export async function fetchJob(id: string): Promise<JobRow | null> {

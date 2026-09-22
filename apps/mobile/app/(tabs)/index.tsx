@@ -35,6 +35,7 @@ export default function JobsScreen(): React.JSX.Element {
   const router = useRouter();
 
   const {
+    jobs,
     visible,
     lowRelevance,
     expired,
@@ -64,9 +65,29 @@ export default function JobsScreen(): React.JSX.Element {
     }
   }, [params.filter]);
 
+  // The active band: everything except the postings the reconcile retired.
+  //
+  // `showFiltered` has to change what is rendered, not only what the banner says.
+  // It widens the pool by re-deriving from `jobs` rather than by concatenating
+  // `visible` and `lowRelevance`, so the server's ordering (first_seen_at desc)
+  // still holds across both bands — a revealed low-match job appears where it
+  // belongs chronologically instead of being appended after every high-match one.
+  const activePool = useMemo(
+    () => (showFiltered ? jobs.filter((job) => !job.isExpired) : visible),
+    [showFiltered, jobs, visible],
+  );
+
   // Expired jobs are never mixed into the active list: a closed posting is not
   // actionable, so it must not compete with live ones for attention.
-  const base = status === 'closed' ? expired : visible;
+  const base = status === 'closed' ? expired : activePool;
+
+  // Chip counts describe the pool they filter. Deriving them from `visible` alone
+  // would let the banner announce "Showing 135 low-match jobs" while "All" still
+  // reported only the high-match total.
+  const newInPool = useMemo(
+    () => activePool.filter((job) => job.isNew).length,
+    [activePool],
+  );
 
   const list = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -162,7 +183,7 @@ export default function JobsScreen(): React.JSX.Element {
         <View style={s.segment}>
           <SegmentButton
             label="Active"
-            count={visible.length}
+            count={activePool.length}
             active={status === 'active'}
             onPress={() => setStatus('active')}
           />
@@ -179,7 +200,11 @@ export default function JobsScreen(): React.JSX.Element {
             {FILTERS.map((option) => {
               const active = filter === option.key;
               const count =
-                option.key === 'new' ? newCount : option.key === 'all' ? visible.length : undefined;
+                option.key === 'new'
+                  ? newInPool
+                  : option.key === 'all'
+                    ? activePool.length
+                    : undefined;
               return (
                 <Pressable
                   key={option.key}

@@ -11,6 +11,15 @@
     "exactOptionalPropertyTypes": false,
     "noEmit": true
   },
-  "include": ["app/**/*.ts", "app/**/*.tsx", "src/**/*.ts", "src/**/*.tsx", "expo-env.d.ts"],
+  // `.expo/types/**/*.ts` is added by `expo start`; it holds the generated router
+  // types and is safe to leave out of a fresh clone's typecheck.
+  "include": [
+    "app/**/*.ts",
+    "app/**/*.tsx",
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "expo-env.d.ts",
+    ".expo/types/**/*.ts"
+  ],
   "exclude": ["node_modules"]
 }

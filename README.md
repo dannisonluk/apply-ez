@@ -373,6 +373,58 @@ structure it. A model is the last tier, not the first — and it can only extrac
 the fetcher actually retrieved, so a fetch that returns nothing cannot be rescued by
 a better prompt.
 
+#### Politeness is part of correctness
+
+The first version of these three adapters had its own `fetchJson` in each file, and
+every one of them called bare `fetch`. That looked harmless and was not: it bypassed
+`throttledFetch`, which is where the project's robots.txt check and per-host rate
+limiter live. The DOM adapters all went through it; the new ones silently did not.
+
+The cost showed up as a block rather than a bug report:
+
+```
+HSBC   247 listing + 247 detail requests in ~2 minutes  →  HTTP 403 from CloudFront
+```
+
+Every request after that was refused too — including `robots.txt` itself. Nothing in
+the run said "we are being blocked"; it said `HTTP 403`, which reads like a
+permissions problem rather than "you asked 494 times in two minutes".
+
+All platform HTTP now goes through one helper, `lib/http-json.ts`:
+
+| Concern | Mechanism |
+|---|---|
+| May we fetch this URL? | `throttledFetch` → robots.txt verdict, fail-open if unreadable |
+| How fast? | per-host `Bottleneck`, default 1 req/s, raised by any declared `crawl-delay` |
+| Who are we? | `scraperUserAgent()` — the declared bot identity, never a browser string |
+| Transient failure? | `withRetry` with backoff, honouring `Retry-After` |
+
+Two deliberate choices in there:
+
+- **403 is not retried.** 408/429/5xx and transient socket errors are. A 403 from a
+  CDN edge is a block, not a blip, and retrying multiplies load against whatever just
+  decided to refuse us — which is how a two-minute block becomes an hourly one.
+- **A declared `crawl-delay` is honoured**, and only ever slows us down. AXA asks for
+  5 seconds — five times our default pace — which costs ~15s for its 68 postings.
+
+There is also a new guard, because a blocked host should not be hammered:
+`FailureCircuit`. A detail stage that has seen ≥8 failures while failing ≥80% of the
+time stops claiming new work, and reports `aborted after N failed / M ok` rather than
+a partial count that reads like a near-complete crawl. Isolated failures among
+successes do not trip it, so the one-pass retry over dropped details still runs.
+
+`probe:robots` answers the question this raised — does the new compliance actually
+permit the endpoints the adapters use?
+
+```bash
+pnpm --filter @apply-ez/scraper-core probe:robots
+# 0 disallowed URL(s), 1 URL(s) under a declared crawl-delay
+```
+
+All 12 enabled targets are allowed. Three of them (`towngas`, `mtr`, `clp`) have no
+readable `robots.txt` — two genuine 404s and one redirect to the homepage — so they
+fail open, which is the pre-existing behaviour rather than something this changed.
+
 ### The Cathay adapter, as a worked example
 
 Cathay is the case that shows why "the field is populated" is not the same as "the
@@ -415,14 +467,18 @@ Two things generalise from this:
 Run the regression checks:
 
 ```bash
-pnpm --filter @apply-ez/scraper-core check           # all seven suites, 433 assertions
+pnpm --filter @apply-ez/scraper-core check           # all nine suites, 534 assertions
 pnpm --filter @apply-ez/scraper-core check:backfill  # 40
 pnpm --filter @apply-ez/scraper-core check:hk-time   # 51
 pnpm --filter @apply-ez/scraper-core check:relevance # 148
 pnpm --filter @apply-ez/scraper-core check:llm       # 91
 pnpm --filter @apply-ez/scraper-core check:push      # 33
 pnpm --filter @apply-ez/scraper-core check:store     # 19
-pnpm --filter @apply-ez/scraper-core check:workday   # 51
+pnpm --filter @apply-ez/scraper-core check:http      # 37
+pnpm --filter @apply-ez/scraper-core check:workday   # 56
+pnpm --filter @apply-ez/scraper-core check:platform  # 59
+
+pnpm --filter @apply-ez/scraper-core probe:robots    # live: is every target allowed?
 
 pnpm check:sql                                       # migrations, 46 assertions
 
@@ -441,6 +497,20 @@ both directions — it must fire on `PGRST202`/`PGRST204`/`PGRST205`/`42703`, an
 *not* fire on a `23505` unique violation, a `23514` CHECK violation, a `42501` RLS
 denial, or a 5xx. A false positive there would send you to re-apply a migration that
 is already live.
+
+`check:http` is mostly assertions about what does **not** happen, because that is
+where the bugs were: a disallowed path is *never requested* (not "requested then
+discarded"), a 403 is *not retried*, a declared `crawl-delay` is *not ignored*, the
+`user-agent` contains no `Mozilla`, and a POST body goes out verbatim. It also covers
+`FailureCircuit` — including the latch, since a circuit that reopens after a few
+in-flight successes is worse than none.
+
+The mock suites run with pacing and retries switched off, because production pacing
+(1 req/s) would make a 45-detail crawl take 45 seconds for no added coverage.
+`configureRateLimit()` is the hook for that; it must be called before any scrape
+starts, since it discards the per-host limiters. The retry knobs are read per call
+rather than at import time, so setting `process.env` at the top of a script works
+regardless of module evaluation order.
 
 `check:workday` runs the adapter against a local mock CXS server that deliberately
 reproduces the two behaviours that broke the first live run — `total: 0` on later

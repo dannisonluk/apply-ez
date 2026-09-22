@@ -22,8 +22,11 @@
  * has not run — it is the cheapest target in the fleet by a wide margin.
  */
 import type { RawJob, ScrapeContext, ScrapeResult, ScraperAdapter } from './adapter.interface.js';
+import { FailureCircuit } from '../lib/circuit.js';
+import { mapWithConcurrency, readPositiveInt } from '../lib/concurrency.js';
 import { normalizeText, stripHtmlToText } from '../lib/text.js';
 import { parseHongKongDateTime } from '../lib/hk-time.js';
+import { fetchJson } from '../lib/http-json.js';
 
 /** Workday rejects `limit` above 20. */
 const PAGE_SIZE = 20;
@@ -141,72 +144,16 @@ interface WorkdayDetailInfo {
   jobRequisitionLocation?: { descriptor?: string } | string;
 }
 
-function readPositiveInt(value: unknown, fallback: number): number {
-  const parsed = typeof value === 'number' ? value : Number.parseInt(String(value ?? ''), 10);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
-}
-
 /** "Posted Today" / "Posted 3 Days Ago" → now; anything else is left to the caller. */
 function isRelativePostedOn(value: string | undefined): boolean {
   return !!value && /posted\s+\d+\s+days?\s+ago|posted\s+today|posted\s+yesterday/i.test(value);
 }
 
-/**
- * Fetch and parse JSON, reporting WHY on failure.
- *
- * The optional `onFailure` matters: the first Manulife run failed with nothing
- * but "listing page failed", because a wrong facet key makes Workday answer 400
- * and a bare `undefined` return throws the explanation away. A silent failure on
- * a listing endpoint looks identical to an empty careers site.
- */
-async function fetchJson<T>(
-  url: string,
-  init: RequestInit = {},
-  onFailure?: (detail: string) => void,
-): Promise<T | undefined> {
-  try {
-    const response = await fetch(url, {
-      ...init,
-      headers: {
-        accept: 'application/json',
-        'user-agent': 'Mozilla/5.0 (compatible; apply-ez/0.1)',
-        ...(init.headers ?? {}),
-      },
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
-    if (!response.ok) {
-      const body = await response.text().catch(() => '');
-      onFailure?.(`HTTP ${response.status} ${body.slice(0, 240)}`);
-      return undefined;
-    }
-    return (await response.json()) as T;
-  } catch (error) {
-    onFailure?.(error instanceof Error ? error.message : String(error));
-    return undefined;
-  }
-}
-
-/** Bounded-concurrency map — sequential would make 200 detail fetches feel dead. */
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  limit: number,
-  worker: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let cursor = 0;
-  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    for (;;) {
-      const index = cursor;
-      cursor += 1;
-      if (index >= items.length) return;
-      const item = items[index];
-      if (item === undefined) continue;
-      results[index] = await worker(item, index);
-    }
-  });
-  await Promise.all(runners);
-  return results;
-}
+// HTTP for this adapter goes through `lib/http-json.ts`, which wraps every request
+// in `throttledFetch` (robots.txt verdict + declared crawl-delay + per-host pacing)
+// and `withRetry`. The local `fetchJson` that used to sit here called bare `fetch`
+// and bypassed all of it — which is how a full crawl of this target earned a CDN
+// block, and why a listing failure was reported as an unexplained `undefined`.
 
 export class WorkdayAdapter implements ScraperAdapter {
   readonly name = 'workday';
@@ -273,18 +220,23 @@ export class WorkdayAdapter implements ScraperAdapter {
     for (let page = 0; page < maxPages; page += 1) {
       const offset = page * PAGE_SIZE;
 
+      // `onFailure` is what keeps a broken listing diagnosable. The first Manulife
+      // run reported nothing but "listing page failed", because a wrong facet key
+      // makes Workday answer 400 and a bare `undefined` throws the explanation
+      // away — and a silent failure on a listing endpoint is indistinguishable
+      // from an empty careers site.
       const payload = await fetchJson<{ total?: number; jobPostings?: WorkdayListPosting[] }>(
         `${endpoint.cxs}/jobs`,
         {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ appliedFacets, limit: PAGE_SIZE, offset, searchText }),
-        },
-        (detail) => {
-          errors.push({
-            message: `workday: listing page failed at offset ${offset}`,
-            context: { detail, appliedFacets },
-          });
+          timeoutMs: REQUEST_TIMEOUT_MS,
+          onFailure: (detail) => {
+            errors.push({
+              message: `workday: listing page failed at offset ${offset}`,
+              context: { detail, appliedFacets },
+            });
+          },
         },
       );
 
@@ -339,26 +291,55 @@ export class WorkdayAdapter implements ScraperAdapter {
     const details = new Map<string, WorkdayDetailInfo>();
     if (includeDetail && capped.length > 0) {
       const targets = capped.slice(0, detailMaxJobs);
-      let failed = 0;
-      await mapWithConcurrency(targets, detailConcurrency, async (posting) => {
-        const path = posting.externalPath;
-        if (!path) return;
-        const payload = await fetchJson<{ jobPostingInfo?: WorkdayDetailInfo | null }>(
-          `${endpoint.cxs}${path}`,
-        );
-        const info = payload?.jobPostingInfo;
-        if (!info) {
-          failed += 1;
-          return;
-        }
-        details.set(path, info);
-      });
+      // Once the host starts refusing detail requests, the rest of the batch is
+      // pure waste and every extra request extends the refusal. See `lib/circuit.ts`.
+      const circuit = new FailureCircuit();
+      await mapWithConcurrency(
+        targets,
+        detailConcurrency,
+        async (posting) => {
+          const path = posting.externalPath;
+          if (!path) return;
+          const payload = await fetchJson<{ jobPostingInfo?: WorkdayDetailInfo | null }>(
+            `${endpoint.cxs}${path}`,
+            { timeoutMs: REQUEST_TIMEOUT_MS },
+          );
+          const info = payload?.jobPostingInfo;
+          if (!info) {
+            circuit.recordFailure();
+            return;
+          }
+          circuit.recordSuccess();
+          details.set(path, info);
+        },
+        () => circuit.isOpen,
+      );
       ctx.logger.info('workday: detail stage', {
         attempted: targets.length,
         enriched: details.size,
-        failed,
+        failed: circuit.failureCount,
         skipped: capped.length - targets.length,
+        aborted: circuit.isOpen,
       });
+
+      // A posting whose detail fetch failed loses `endDate` (the real deadline)
+      // and its description, so it loses its LLM summary too. Report it as a run
+      // error instead of only logging it — otherwise a partial crawl is
+      // indistinguishable from a complete one in the run summary.
+      if (circuit.failureCount > 0) {
+        errors.push({
+          message: circuit.isOpen
+            ? `workday: detail stage aborted after ${circuit.describe()} — the host is refusing detail requests`
+            : `workday: detail stage incomplete — ${circuit.failureCount}/${targets.length} postings failed`,
+          context: {
+            failed: circuit.failureCount,
+            attempted: targets.length,
+            aborted: circuit.isOpen,
+            tenant: endpoint.tenant,
+            site: endpoint.site,
+          },
+        });
+      }
     }
 
     // ── map to RawJob ─────────────────────────────────────────────────────────

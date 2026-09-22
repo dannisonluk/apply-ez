@@ -20,6 +20,22 @@ import type { AddressInfo } from 'node:net';
 import { WorkdayAdapter, parseWorkdayBullets, parseWorkdayUrl } from '../src/adapters/workday.adapter.js';
 import type { ScrapeContext } from '../src/adapters/adapter.interface.js';
 import { hongKongDateOf } from '../src/lib/hk-time.js';
+import { configureRateLimit } from '../src/lib/rate-limit.js';
+
+// The checks drive local mock servers on 127.0.0.1. Two knobs keep this suite
+// fast and its assertions exact:
+//
+//   - pacing off — the production 1 req/sec would make the 45-detail crawl below
+//     take 45 seconds without adding any coverage, since pacing is what
+//     `check-http.ts` tests;
+//   - retries off — so a deliberately-refused request is counted once, which is
+//     what the circuit assertions depend on. Retry behaviour is also covered by
+//     `check-http.ts`.
+//
+// Both are read per call rather than at import time, so setting them here works
+// regardless of module evaluation order.
+process.env.SCRAPER_RETRY_MAX_ATTEMPTS = '0';
+configureRateLimit({ minTimeMs: 0, maxConcurrent: 8 });
 
 let passed = 0;
 let failed = 0;
@@ -294,6 +310,59 @@ async function main(): Promise<void> {
     new WorkdayAdapter().scrape(context(base, { maxDetailJobs: 5 })),
   );
   check('detail: maxDetailJobs is honoured', capped.detailCalls, 5);
+
+  // ── the detail stage aborts when the host refuses everything ──────────────
+  // This is the measured production failure rather than a hypothetical: a CDN
+  // that starts answering 403 to every request. Before the circuit existed the
+  // run would make all 45 detail requests anyway — 45 wasted requests against the
+  // thing that had just decided to block us, each one extending the block.
+  const refusing = { detailCalls: 0 };
+  const refusingServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+    const url = req.url ?? '';
+    if (req.method === 'POST' && url.endsWith('/jobs')) {
+      let body = '';
+      req.on('data', (chunk) => {
+        body += chunk;
+      });
+      req.on('end', () => {
+        const offset = (JSON.parse(body || '{}') as { offset?: number }).offset ?? 0;
+        const slice = Array.from({ length: Math.min(PAGE_SIZE, TOTAL - offset) }, (_, i) =>
+          makePosting(offset + i),
+        );
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ total: offset === 0 ? TOTAL : 0, jobPostings: slice }));
+      });
+      return;
+    }
+    if (req.method === 'GET' && url.includes('/job/')) {
+      refusing.detailCalls += 1;
+      res.writeHead(403, { 'content-type': 'text/html' });
+      res.end('<html><body><h1>403 ERROR</h1></body></html>');
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  const refused = await (async () => {
+    await new Promise<void>((resolve) => refusingServer.listen(0, '127.0.0.1', resolve));
+    try {
+      const port = (refusingServer.address() as AddressInfo).port;
+      return await new WorkdayAdapter().scrape(context(`http://127.0.0.1:${port}/wday/cxs/acme/External`));
+    } finally {
+      await new Promise<void>((resolve) => refusingServer.close(() => resolve()));
+    }
+  })();
+
+  // Every runner polls the circuit before claiming its next item, so the crawl
+  // stops within one round of tripping rather than at the end of the batch.
+  check('circuit: stops far short of the full batch', refusing.detailCalls < 20, true);
+  check('circuit: the abort is reported', /aborted after/.test(refused.errors[0]?.message ?? ''), true);
+  check('circuit: the report says how far it got', /failed \/ \d+ ok/.test(refused.errors[0]?.message ?? ''), true);
+  // The listing itself still lands, so this is a partial success rather than a
+  // wipe-out — and the postings keep the fields that do not need the detail stage.
+  check('circuit: the listing still yields every job', refused.jobs.length, TOTAL);
+  check('circuit: no deadline without detail', refused.jobs[0]?.applicationDeadline, undefined);
 
   // ── maxJobs caps the crawl ────────────────────────────────────────────────
   const cappedJobs: MockOptions = { acceptedFacet: 'locationCountry', listingCalls: 0, detailCalls: 0 };

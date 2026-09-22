@@ -78,19 +78,26 @@ export const SCRAPE_TARGETS: ScrapeTarget[] = [
   {
     id: 'axa',
     name: 'AXA Hong Kong Careers',
-    adapter: 'axa',
+    // Phenom People `/api/jobs`. The only filter the API honours is `location`,
+    // read from the entry URL's query string — so the entry URL below is reduced
+    // to exactly what the adapter uses.
+    //
+    // The commute-search parameters the site itself uses (`woe`, `lat`, `lng`,
+    // `searchType=commute`) are NOT API filters: passing them is accepted and
+    // silently ignored, returning the global board — 1,515 postings instead of
+    // 68. That looks like a successful crawl of the wrong data.
+    adapter: 'phenom',
     companyName: 'AXA',
     companySlug: 'axa',
     companyDomain: 'axa.com',
-    entryUrls: [
-      'https://careers.axa.com/careers-home/jobs?woe=7&lat=22.28552&lng=114.15769&location=Hong%20Kong,%20Central%20and%20Western%20District,%20Hong%20Kong&commuteUnit=DRIVING&commute=60&roadTraffic=BUSY_HOUR&searchType=commute&page=1&limit=100',
-    ],
+    entryUrls: ['https://careers.axa.com/careers-home/jobs?location=Hong%20Kong'],
     region: 'HK',
     config: {
       companyName: 'AXA',
       companyDomain: 'axa.com',
-      maxPages: 1,
-      maxJobs: 100,
+      limit: 25,
+      maxJobs: 300,
+      lang: 'en-us',
       reconcileMissingJobs: true,
     },
     enabled: true,
@@ -122,18 +129,25 @@ export const SCRAPE_TARGETS: ScrapeTarget[] = [
   {
     id: 'hsbc',
     name: 'HSBC Hong Kong Careers',
-    adapter: 'corporate-careers',
+    // Eightfold `/api/apply/v2/jobs`. `domain` comes from companyDomain and the
+    // `location` / `hl` filters are read from the entry URL's query string.
+    //
+    // A detail fetch per posting is mandatory here: the listing returns
+    // `job_description: ""` and omits `apply_redirect_url`, which points at the
+    // SuccessFactors requisition the apply flow will eventually need.
+    adapter: 'eightfold',
     companyName: 'HSBC',
     companySlug: 'hsbc',
     companyDomain: 'hsbc.com',
     entryUrls: ['https://portal.careers.hsbc.com/careers?location=Hong+Kong&hl=en'],
     region: 'HK',
     config: {
-      platform: 'hsbc',
       companyName: 'HSBC',
       companyDomain: 'hsbc.com',
-      maxPages: 5,
+      num: 20,
+      maxJobs: 500,
       includeDetailPages: true,
+      maxDetailJobs: 400,
       reconcileMissingJobs: true,
     },
     enabled: true,

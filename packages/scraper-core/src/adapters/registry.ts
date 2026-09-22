@@ -12,6 +12,8 @@ import { ManulifeAdapter } from './manulife.adapter.js';
 import { HSBCAdapter } from './hsbc.adapter.js';
 import { CorporateCareersAdapter } from './corporate-careers.adapter.js';
 import { WorkdayAdapter } from './workday.adapter.js';
+import { EightfoldAdapter } from './eightfold.adapter.js';
+import { PhenomAdapter } from './phenom.adapter.js';
 
 const adapters: Record<string, ScraperAdapter> = {
   cathaypacific: new CathayPacificAdapter(),
@@ -26,9 +28,19 @@ const adapters: Record<string, ScraperAdapter> = {
   manulife: new ManulifeAdapter(),
   hsbc: new HSBCAdapter(),
   'corporate-careers': new CorporateCareersAdapter(),
-  // Reads Workday's public CXS JSON API — no browser. Prefer this over the
-  // per-tenant Playwright adapters above for any `*.myworkdayjobs.com` site.
+  // ── platform adapters ──────────────────────────────────────────────────────
+  // These read a site's own public JSON API instead of driving a browser. They
+  // are preferred wherever one exists: exact, free, far faster, and they expose
+  // fields the rendered DOM never shows — Workday's `endDate` is the real
+  // application deadline, and Eightfold's `apply_redirect_url` is the ATS link
+  // the apply flow will need.
+  //
+  // The per-tenant DOM adapters above (`aia`, `manulife`, `hsbc`, `axa`) are
+  // superseded by these and are no longer referenced by any target. They are left
+  // registered for now rather than deleted; see the README for the audit.
   workday: new WorkdayAdapter(),
+  eightfold: new EightfoldAdapter(),
+  phenom: new PhenomAdapter(),
 };
 
 export function getAdapter(name: string): ScraperAdapter | undefined {

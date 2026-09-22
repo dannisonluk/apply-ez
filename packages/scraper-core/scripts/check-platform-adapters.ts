@@ -18,6 +18,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net';
 import {
   EightfoldAdapter,
+  fromPcsxPosition,
   fromUnixSeconds,
   parseEightfoldUrl,
 } from '../src/adapters/eightfold.adapter.js';
@@ -31,6 +32,10 @@ import { configureRateLimit } from '../src/lib/rate-limit.js';
 // Both are read per call rather than at import time.
 process.env.SCRAPER_RETRY_MAX_ATTEMPTS = '0';
 configureRateLimit({ minTimeMs: 0, maxConcurrent: 8 });
+
+/** Morgan Stanley's real careers URL — the reference PCSX tenant. */
+const MS_URL =
+  'https://morganstanley.eightfold.ai/careers?source=mscom&start=0&pid=549798142393&sort_by=timestamp&filter_city=Hong+Kong&filter_employmenttype=full+time&filter_country=Hong+Kong';
 
 let passed = 0;
 let failed = 0;
@@ -59,6 +64,64 @@ check('ef url: no location is allowed', parseEightfoldUrl('https://x.example.com
 check('ef url: explicit ?domain= wins', parseEightfoldUrl('https://x.example.com/c?domain=other.com', 'x.com')?.domain, 'other.com');
 check('ef url: no domain anywhere is rejected', parseEightfoldUrl('https://x.example.com/careers'), undefined);
 check('ef url: garbage is rejected', parseEightfoldUrl('not a url', 'x.com'), undefined);
+
+// ─── parseEightfoldUrl: the PCSX listing variant (Morgan Stanley) ─────────────
+// The filter lives in the careers URL's query string, so it is forwarded rather
+// than re-declared in config — one place to change.
+const ms = parseEightfoldUrl(MS_URL, 'morganstanley.com');
+check('ef pcsx: search base', ms?.pcsxBase, 'https://morganstanley.eightfold.ai/api/pcsx/search');
+check('ef pcsx: origin kept for the relative positionUrl', ms?.origin, 'https://morganstanley.eightfold.ai');
+check('ef pcsx: domain', ms?.domain, 'morganstanley.com');
+check('ef pcsx: filter_country forwarded', ms?.filters['filter_country'], 'Hong Kong');
+check('ef pcsx: filter_city forwarded', ms?.filters['filter_city'], 'Hong Kong');
+check('ef pcsx: filter_employmenttype forwarded', ms?.filters['filter_employmenttype'], 'full time');
+// The traps. `start`, `pid` and `source` are browser state, not filters —
+// forwarding `start` would pin pagination to whatever page the human was on.
+check('ef pcsx: start is NOT forwarded', ms?.filters['start'], undefined);
+check('ef pcsx: pid is NOT forwarded', ms?.filters['pid'], undefined);
+check('ef pcsx: source is NOT forwarded', ms?.filters['source'], undefined);
+check('ef pcsx: an apply-v2 URL carries no filters', ef?.filters, {});
+
+// ─── fromPcsxPosition: the PCSX listing shape normalised ─────────────────────
+// The two listing APIs disagree on nearly every key name, so this is the single
+// place that reconciles them. A verbatim Morgan Stanley listing item.
+const pcsxItem = fromPcsxPosition(
+  {
+    id: 549800423238,
+    displayJobId: 'JR044450',
+    name: 'Equity Research – Analyst, China Internet (Hong Kong)',
+    locations: ['Hong Kong, Hong Kong'],
+    standardizedLocations: ['HK'],
+    postedTs: 1790035200,
+    creationTs: 1790035200,
+    department: 'Research',
+    workLocationOption: 'onsite',
+    atsJobId: 'JR044450',
+    positionUrl: '/careers/job/549800423238',
+  },
+  'https://morganstanley.eightfold.ai',
+);
+check('ef pcsx item: id', pcsxItem.id, 549800423238);
+check('ef pcsx item: name', pcsxItem.name, 'Equity Research – Analyst, China Internet (Hong Kong)');
+check('ef pcsx item: displayJobId -> display_job_id', pcsxItem.display_job_id, 'JR044450');
+check('ef pcsx item: postedTs -> t_create', pcsxItem.t_create, 1790035200);
+check('ef pcsx item: first location lifted', pcsxItem.location, 'Hong Kong, Hong Kong');
+check('ef pcsx item: department', pcsxItem.department, 'Research');
+check('ef pcsx item: workLocationOption -> work_location_option', pcsxItem.work_location_option, 'onsite');
+// `positionUrl` is relative; left as-is the app would have no usable link.
+check(
+  'ef pcsx item: relative positionUrl made absolute',
+  pcsxItem.canonicalPositionUrl,
+  'https://morganstanley.eightfold.ai/careers/job/549800423238',
+);
+check(
+  'ef pcsx item: an absolute positionUrl is left alone',
+  fromPcsxPosition({ positionUrl: 'https://x.example.com/j/1' }, 'https://y.example.com').canonicalPositionUrl,
+  'https://x.example.com/j/1',
+);
+check('ef pcsx item: empty locations yields no location', fromPcsxPosition({ id: 1, locations: [] }, 'https://x.example.com').location, undefined);
+check('ef pcsx item: a missing id stays missing', fromPcsxPosition({ name: 'x' }, 'https://x.example.com').id, undefined);
+check('ef pcsx item: postedTs becomes an ISO date', fromUnixSeconds(pcsxItem.t_create), '2026-09-22T00:00:00.000Z');
 
 // ─── fromUnixSeconds ──────────────────────────────────────────────────────────
 check('unix: seconds', fromUnixSeconds(1760608068), '2025-10-16T09:47:48.000Z');
@@ -350,6 +413,154 @@ async function main(): Promise<void> {
   check('ef detail: disabled makes no detail calls', noDetail.detailCalls, 0);
   check('ef detail: listing still complete without detail', noDetailResult.jobs.length, EF_TOTAL);
   check('ef detail: no description without detail', noDetailResult.jobs[0]?.description, undefined);
+
+  // ── Eightfold PCSX: the migrated tenant, and the automatic switch ──────────
+  // Morgan Stanley answers the apply-v2 listing with
+  // `403 {"message":"Not authorized for PCSX"}`. That is a routing answer, not a
+  // refusal — the adapter must recognise it, switch to /api/pcsx/search, and NOT
+  // report the 403 as a failed crawl. This is what lets a tenant migrate without
+  // anyone editing config.
+  const PCSX_TOTAL = 14;
+  interface PcsxState {
+    applyV2Calls: number;
+    pcsxCalls: number;
+    detailCalls: number;
+    lastFilter: string;
+  }
+  const newPcsxState = (): PcsxState => ({ applyV2Calls: 0, pcsxCalls: 0, detailCalls: 0, lastFilter: '' });
+
+  const startPcsxMock = (state: PcsxState) =>
+    createServer((req: IncomingMessage, res: ServerResponse) => {
+      const url = new URL(req.url ?? '', 'http://127.0.0.1');
+      if (url.pathname.includes('/api/apply/v2/jobs/')) {
+        state.detailCalls += 1;
+        const id = url.pathname.split('/').pop() ?? '';
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            id: Number(id),
+            name: 'PCSX Role',
+            job_description: `<p>Body for ${id}</p>`,
+            apply_redirect_url: `https://ms.wd5.myworkdayjobs.com/External/job/${id}`,
+          }),
+        );
+        return;
+      }
+      if (url.pathname.endsWith('/api/apply/v2/jobs')) {
+        state.applyV2Calls += 1;
+        res.writeHead(403, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ message: 'Not authorized for PCSX' }));
+        return;
+      }
+      if (url.pathname.endsWith('/api/pcsx/search')) {
+        state.pcsxCalls += 1;
+        state.lastFilter = url.searchParams.get('filter_country') ?? '';
+        const start = Number(url.searchParams.get('start') ?? 0);
+        // PCSX ignores `num` and always returns a page of 10.
+        const size = Math.max(0, Math.min(10, PCSX_TOTAL - start));
+        const slice = Array.from({ length: size }, (_, i) => ({
+          id: 6000 + start + i,
+          displayJobId: `JR${start + i}`,
+          name: `PCSX Role ${start + i}`,
+          locations: ['Hong Kong, Hong Kong'],
+          postedTs: 1790035200,
+          department: 'Research',
+          positionUrl: `/careers/job/${6000 + start + i}`,
+        }));
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            status: 200,
+            error: { message: '', body: '' },
+            data: { positions: slice, count: PCSX_TOTAL, appliedFilters: { country: ['Hong Kong'] } },
+          }),
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+  const msContext = (origin: string, overrides: Record<string, unknown> = {}): ScrapeContext => ({
+    targetId: 'mock-ms',
+    urlTemplate: undefined,
+    entryUrls: [MS_URL],
+    config: {
+      companyName: 'Morgan Stanley',
+      companyDomain: 'morganstanley.com',
+      apiBase: `${origin}/api/apply/v2/jobs`,
+      pcsxBase: `${origin}/api/pcsx/search`,
+      listingApi: 'auto',
+      maxJobs: 100,
+      includeDetailPages: true,
+      maxDetailJobs: 100,
+      detailConcurrency: 4,
+      ...overrides,
+    },
+    region: 'HK',
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+  });
+
+  const pcsxState = newPcsxState();
+  const pcsxResult = await withServer(startPcsxMock(pcsxState), (origin) =>
+    new EightfoldAdapter().scrape(msContext(origin)),
+  );
+
+  check('ef pcsx: apply-v2 probed exactly once', pcsxState.applyV2Calls, 1);
+  check('ef pcsx: switched to /api/pcsx/search', pcsxState.pcsxCalls, 2);
+  check('ef pcsx: the routing 403 is NOT reported as an error', pcsxResult.errors.length, 0);
+  check('ef pcsx: every posting collected', pcsxResult.jobs.length, PCSX_TOTAL);
+  check('ef pcsx: no duplicates', new Set(pcsxResult.jobs.map((j) => j.externalId)).size, PCSX_TOTAL);
+  // Pagination must advance by what came back: PCSX caps the page at 10 and
+  // ignores the requested `num`, so assuming `num` would silently skip postings.
+  check('ef pcsx: paginated past the 10-item page', pcsxResult.jobs.length > 10, true);
+  check('ef pcsx: filter_country came from the entry URL', pcsxState.lastFilter, 'Hong Kong');
+  // The detail endpoint is shared with apply-v2, even on a PCSX tenant.
+  check('ef pcsx: detail fetched from the apply-v2 detail endpoint', pcsxState.detailCalls, PCSX_TOTAL);
+  check('ef pcsx: description from detail', pcsxResult.jobs[0]?.description?.includes('Body for'), true);
+  check('ef pcsx: apply URL is the ATS link', pcsxResult.jobs[0]?.applyUrl?.startsWith('https://ms.wd5.myworkdayjobs.com/'), true);
+  check('ef pcsx: relative positionUrl made absolute', pcsxResult.jobs[0]?.url?.startsWith('https://morganstanley.eightfold.ai/careers/job/'), true);
+  check('ef pcsx: publishedAt from postedTs', pcsxResult.jobs[0]?.publishedAt, '2026-09-22T00:00:00.000Z');
+
+  // An explicit `listingApi: 'pcsx'` must not waste the apply-v2 probe.
+  const explicitState = newPcsxState();
+  await withServer(startPcsxMock(explicitState), (origin) =>
+    new EightfoldAdapter().scrape(msContext(origin, { listingApi: 'pcsx' })),
+  );
+  check('ef pcsx: an explicit listingApi skips the apply-v2 probe', explicitState.applyV2Calls, 0);
+
+  // The switch must fire on the PCSX signal ONLY. A plain 403 is a block, and
+  // silently retrying it as PCSX would turn a real refusal into a mystery.
+  const plainBlockState = newPcsxState();
+  const plainBlockServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+    const url = new URL(req.url ?? '', 'http://127.0.0.1');
+    if (url.pathname.endsWith('/api/pcsx/search')) {
+      plainBlockState.pcsxCalls += 1;
+      res.writeHead(403, { 'content-type': 'text/html' });
+      res.end('<html><body><h1>403 ERROR</h1></body></html>');
+      return;
+    }
+    if (url.pathname.endsWith('/api/apply/v2/jobs')) {
+      plainBlockState.applyV2Calls += 1;
+      res.writeHead(403, { 'content-type': 'text/html' });
+      res.end('<html><body><h1>403 ERROR</h1></body></html>');
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  const plainBlockResult = await withServer(plainBlockServer, (origin) =>
+    new EightfoldAdapter().scrape(msContext(origin)),
+  );
+  check('ef block: a plain 403 is still reported', plainBlockResult.errors.length, 1);
+  check('ef block: no jobs from a blocked listing', plainBlockResult.jobs.length, 0);
+  check(
+    'ef block: the reported reason carries the status',
+    /403/.test(String(plainBlockResult.errors[0]?.context?.['detail'] ?? '')),
+    true,
+  );
+  check('ef block: it did NOT switch to PCSX', plainBlockState.pcsxCalls, 0);
 
   // ── Phenom: one call, no detail stage, and the location guard ──────────────
   const phResult = await withServer(startPhenomMock({ failFirstPage: false }), (origin) =>

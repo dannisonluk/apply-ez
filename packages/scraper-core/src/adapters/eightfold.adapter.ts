@@ -1,24 +1,41 @@
 /**
- * Eightfold adapter — reads the public `/api/apply/v2/jobs` JSON API.
+ * Eightfold adapter — reads a tenant's public job API.
  *
  * Built for HSBC, but Eightfold powers a lot of large-company career sites, so it
  * is keyed by platform rather than by company: point a target at it with the right
  * `domain` and it works.
  *
- *   GET {origin}/api/apply/v2/jobs?domain={domain}&location={loc}&hl={hl}&start=N&num=M
- *   GET {origin}/api/apply/v2/jobs/{id}?domain={domain}&hl={hl}
+ * ## Two listing APIs, one detail API
  *
- * The listing and detail responses carry DIFFERENT fields, which is the thing to
- * know about this API:
+ * Eightfold tenants are migrating from the original listing endpoint to a newer
+ * one, and a tenant runs one or the other:
  *
- *   - the listing returns `job_description: ""` — the description is genuinely
- *     absent, not empty-by-accident, so a detail fetch is mandatory;
+ *   apply-v2   GET {origin}/api/apply/v2/jobs?domain={d}&location={loc}&hl={hl}&start=N&num=M
+ *   pcsx       GET {origin}/api/pcsx/search?domain={d}&start=N&filter_country={c}&...
+ *
+ * The difference is not cosmetic. Measured on Morgan Stanley, which has migrated:
+ * the apply-v2 listing answers `403 {"message":"Not authorized for PCSX"}` while
+ * `/api/pcsx/search` answers 200 — and that 403 is a perfectly healthy answer from
+ * the tenant's point of view, not a block. `listingApi: 'auto'` (the default) tries
+ * apply-v2 first and switches on exactly that signal, so a tenant can migrate
+ * without anyone editing config. Note the two APIs disagree about page size as
+ * well: PCSX ignores `num` and returns a fixed page of 10, which is why pagination
+ * below advances by what actually came back rather than by what was asked for.
+ *
+ * The DETAIL endpoint is shared and unchanged — `GET {origin}/api/apply/v2/jobs/{id}`
+ * — and even on a PCSX tenant that is where `job_description` and
+ * `apply_redirect_url` live.
+ *
+ * ## Listing and detail carry different fields
+ *
+ *   - the listing has no description at all (`job_description: ""` on apply-v2,
+ *     absent entirely on PCSX), so a detail fetch is mandatory;
  *   - the detail returns `apply_redirect_url`, which points at the ATS behind the
- *     careers site (SuccessFactors for HSBC). That is the URL the apply flow will
- *     eventually need, and the listing never exposes it.
+ *     careers site (SuccessFactors for HSBC, Workday for Morgan Stanley). That is
+ *     the URL the apply flow will eventually need, and the listing never exposes it.
  *
- * Pagination is well-behaved here: past the last page it returns an empty
- * `positions` array, so — unlike Workday — an empty batch is a usable stop signal.
+ * Pagination is well-behaved on both: past the last page the listing returns an
+ * empty array, so — unlike Workday — an empty batch is a usable stop signal.
  */
 import type { RawJob, ScrapeContext, ScrapeResult, ScraperAdapter } from './adapter.interface.js';
 import { FailureCircuit } from '../lib/circuit.js';
@@ -35,6 +52,7 @@ const REQUEST_TIMEOUT_MS = 30_000;
 /** Safety net: `count` could in principle be wrong, so cap the page loop too. */
 const MAX_PAGES = 60;
 
+/** Normalised across both listing APIs, so everything downstream has one shape. */
 interface EightfoldPosition {
   id?: number | string;
   name?: string;
@@ -55,10 +73,38 @@ interface EightfoldPosition {
   location_flexibility?: string | null;
 }
 
+/** The apply-v2 listing shape. */
 interface EightfoldListResponse {
   count?: number;
   positions?: EightfoldPosition[];
 }
+
+/** The PCSX listing shape. Note the `data` wrapper and the camelCase fields. */
+interface PcsxPosition {
+  id?: number | string;
+  displayJobId?: string;
+  name?: string;
+  locations?: string[];
+  standardizedLocations?: string[];
+  postedTs?: number;
+  creationTs?: number;
+  department?: string;
+  workLocationOption?: string | null;
+  atsJobId?: string;
+  positionUrl?: string;
+}
+
+interface PcsxListResponse {
+  status?: number;
+  error?: { message?: string; body?: string };
+  data?: {
+    positions?: PcsxPosition[];
+    count?: number;
+    appliedFilters?: Record<string, unknown>;
+  };
+}
+
+export type EightfoldListingApi = 'apply-v2' | 'pcsx';
 
 /** `t_create` / `t_update` are Unix SECONDS, not milliseconds. */
 export function fromUnixSeconds(value: unknown): string | undefined {
@@ -71,18 +117,31 @@ export function fromUnixSeconds(value: unknown): string | undefined {
 }
 
 export interface EightfoldEndpoint {
-  /** Base of the jobs API, without a trailing slash. */
+  /** Base of the apply-v2 listing API, and of the shared detail API. */
   apiBase: string;
+  /** Base of the PCSX search API. */
+  pcsxBase: string;
+  /** Scheme + host, used to make PCSX's relative `positionUrl` absolute. */
+  origin: string;
   domain: string;
   location?: string;
   hl: string;
+  /** `filter_*` params from the entry URL, forwarded verbatim to PCSX. */
+  filters: Record<string, string>;
 }
 
 /**
- * Derive the API endpoint from the careers URL the target already carries.
+ * Derive the API endpoints from the careers URL the target already carries.
  *
  * The filter lives in that URL's query string, so `?location=Hong+Kong&hl=en`
  * becomes the API filter without being repeated in config — one place to change.
+ * For a PCSX tenant the same idea applies to `filter_*`: Morgan Stanley's careers
+ * URL carries `filter_country=Hong+Kong`, which is exactly the parameter
+ * `/api/pcsx/search` wants, so it is forwarded rather than re-declared.
+ *
+ * Deliberately forwards ONLY `filter_*`. Those URLs also carry `start`, `pid` and
+ * `source`; forwarding them would pin pagination to whatever page the human was
+ * looking at and re-request a single position id.
  */
 export function parseEightfoldUrl(rawUrl: string, fallbackDomain?: string): EightfoldEndpoint | undefined {
   let url: URL;
@@ -98,12 +157,67 @@ export function parseEightfoldUrl(rawUrl: string, fallbackDomain?: string): Eigh
   const location = url.searchParams.get('location') ?? undefined;
   const hl = url.searchParams.get('hl') ?? 'en';
 
+  const filters: Record<string, string> = {};
+  for (const [key, value] of url.searchParams) {
+    if (key.startsWith('filter_')) filters[key] = value;
+  }
+
   return {
     apiBase: `${url.origin}/api/apply/v2/jobs`,
+    pcsxBase: `${url.origin}/api/pcsx/search`,
+    origin: url.origin,
     domain,
     ...(location ? { location } : {}),
     hl,
+    filters,
   };
+}
+
+/**
+ * Map a PCSX listing item onto the normalised shape.
+ *
+ * The two listing APIs disagree on nearly every key name (`displayJobId` vs
+ * `display_job_id`, `postedTs` vs `t_create`, `locations[]` vs `location`), so
+ * they are reconciled here, at the boundary. Every branch below that reads a
+ * listing item therefore has exactly one shape to handle. Exported for testing.
+ */
+export function fromPcsxPosition(raw: PcsxPosition, origin: string): EightfoldPosition {
+  const location = raw.locations?.find((value) => typeof value === 'string' && value.trim().length > 0);
+  const relative = typeof raw.positionUrl === 'string' ? raw.positionUrl.trim() : '';
+  const canonical = relative
+    ? relative.startsWith('http')
+      ? relative
+      : `${origin}${relative.startsWith('/') ? '' : '/'}${relative}`
+    : undefined;
+
+  return {
+    ...(raw.id === undefined ? {} : { id: raw.id }),
+    ...(raw.name ? { name: raw.name } : {}),
+    ...(raw.displayJobId ? { display_job_id: raw.displayJobId } : {}),
+    ...(raw.atsJobId ? { ats_job_id: raw.atsJobId } : {}),
+    ...(location ? { location } : {}),
+    ...(raw.locations ? { locations: raw.locations } : {}),
+    ...(raw.department ? { department: raw.department } : {}),
+    ...(typeof raw.postedTs === 'number' ? { t_create: raw.postedTs } : {}),
+    ...(typeof raw.creationTs === 'number' ? { t_update: raw.creationTs } : {}),
+    ...(canonical ? { canonicalPositionUrl: canonical } : {}),
+    ...(raw.workLocationOption ? { work_location_option: raw.workLocationOption } : {}),
+  };
+}
+
+/** One page of listings, normalised. */
+interface ListingPage {
+  positions: EightfoldPosition[];
+  /** Items the server actually returned. Pagination must advance by THIS. */
+  rawCount: number;
+  /** The server's total, when it reports one. */
+  count: number;
+}
+
+type ListingAttempt = { ok: true; page: ListingPage } | { ok: false; detail: string };
+
+function resolveListingApi(value: unknown): EightfoldListingApi | 'auto' {
+  return value === 'pcsx' || value === 'apply-v2' || value === 'auto' ? value : 'auto';
 }
 
 // HTTP for this adapter goes through `lib/http-json.ts`, which wraps every request
@@ -132,16 +246,44 @@ export class EightfoldAdapter implements ScraperAdapter {
       };
     }
 
-    // Override hook, also used by `check-eightfold.ts` to point at a local mock.
-    const apiBase =
-      typeof ctx.config.apiBase === 'string' && ctx.config.apiBase.length > 0
-        ? ctx.config.apiBase.replace(/\/+$/, '')
-        : endpoint.apiBase;
+    // Override hooks, also used by `check-platform-adapters.ts` to point at a local
+    // mock. `apiBase` covers the apply-v2 listing and the detail endpoint; the PCSX
+    // listing needs its own base because it is a different path.
+    const override = (value: unknown, fallback: string): string =>
+      typeof value === 'string' && value.length > 0 ? value.replace(/\/+$/, '') : fallback;
+
+    const apiBase = override(ctx.config.apiBase, endpoint.apiBase);
+    const pcsxBase = override(ctx.config.pcsxBase, endpoint.pcsxBase);
 
     const num = readPositiveInt(ctx.config.num, DEFAULT_NUM);
     const maxJobs = readPositiveInt(ctx.config.maxJobs, DEFAULT_MAX_JOBS);
+    const configuredApi = resolveListingApi(ctx.config.listingApi);
+    let listingApi: EightfoldListingApi = configuredApi === 'pcsx' ? 'pcsx' : 'apply-v2';
 
-    const listQuery = (start: number): string => {
+    const fetchListingPage = async (start: number): Promise<ListingAttempt> => {
+      if (listingApi === 'pcsx') {
+        const params = new URLSearchParams({ domain: endpoint.domain, start: String(start) });
+        for (const [key, value] of Object.entries(endpoint.filters)) params.set(key, value);
+        let detail = '';
+        const payload = await fetchJson<PcsxListResponse>(`${pcsxBase}?${params.toString()}`, {
+          timeoutMs: REQUEST_TIMEOUT_MS,
+          onFailure: (reason) => {
+            detail = reason;
+          },
+        });
+        if (!payload) return { ok: false, detail: detail || 'no response' };
+
+        const raw = payload.data?.positions ?? [];
+        return {
+          ok: true,
+          page: {
+            positions: raw.map((item) => fromPcsxPosition(item, endpoint.origin)),
+            rawCount: raw.length,
+            count: typeof payload.data?.count === 'number' ? payload.data.count : 0,
+          },
+        };
+      }
+
       const params = new URLSearchParams({
         domain: endpoint.domain,
         hl: endpoint.hl,
@@ -149,39 +291,69 @@ export class EightfoldAdapter implements ScraperAdapter {
         num: String(num),
       });
       if (endpoint.location) params.set('location', endpoint.location);
-      return `${apiBase}?${params.toString()}`;
+
+      let detail = '';
+      const payload = await fetchJson<EightfoldListResponse>(`${apiBase}?${params.toString()}`, {
+        timeoutMs: REQUEST_TIMEOUT_MS,
+        onFailure: (reason) => {
+          detail = reason;
+        },
+      });
+      if (!payload) return { ok: false, detail: detail || 'no response' };
+
+      const raw = payload.positions ?? [];
+      return {
+        ok: true,
+        page: {
+          positions: raw,
+          rawCount: raw.length,
+          count: typeof payload.count === 'number' ? payload.count : 0,
+        },
+      };
     };
 
     ctx.logger.info('eightfold: listing', {
       domain: endpoint.domain,
+      api: listingApi,
+      filters: Object.keys(endpoint.filters),
       location: endpoint.location ?? '(none)',
       hl: endpoint.hl,
       num,
       maxJobs,
     });
 
+    // First page, and the one place the PCSX switch can happen. A migrated tenant
+    // answers apply-v2 with `403 {"message":"Not authorized for PCSX"}` — that is a
+    // routing answer, not a refusal, so it must not be reported as a failed crawl.
+    let first = await fetchListingPage(0);
+    if (!first.ok && configuredApi === 'auto' && /not authorized for pcsx/i.test(first.detail)) {
+      ctx.logger.info('eightfold: tenant has migrated to the PCSX listing API, switching', {
+        from: listingApi,
+        domain: endpoint.domain,
+      });
+      listingApi = 'pcsx';
+      first = await fetchListingPage(0);
+    }
+
     const positions: EightfoldPosition[] = [];
     const seenIds = new Set<string>();
     let count = 0;
     let start = 0;
 
-    for (let page = 0; page < MAX_PAGES; page += 1) {
-      const payload = await fetchJson<EightfoldListResponse>(listQuery(start), {
-        timeoutMs: REQUEST_TIMEOUT_MS,
-        onFailure: (detail) => {
-          errors.push({
-            message: `eightfold: listing page failed at start=${start}`,
-            context: { detail, domain: endpoint.domain, location: endpoint.location },
-          });
-        },
-      });
+    for (let pageNumber = 0; pageNumber < MAX_PAGES; pageNumber += 1) {
+      const attempt = pageNumber === 0 ? first : await fetchListingPage(start);
+      if (!attempt.ok) {
+        errors.push({
+          message: `eightfold: listing page failed at start=${start}`,
+          context: { detail: attempt.detail, domain: endpoint.domain, api: listingApi },
+        });
+        break;
+      }
 
-      if (!payload) break;
-
-      if (typeof payload.count === 'number' && payload.count > 0) count = payload.count;
-      const batch = payload.positions ?? [];
+      const { positions: batch, rawCount } = attempt.page;
+      if (attempt.page.count > 0) count = attempt.page.count;
       // Unlike Workday, an empty batch here genuinely means "past the end".
-      if (batch.length === 0) break;
+      if (rawCount === 0) break;
 
       let added = 0;
       for (const position of batch) {
@@ -193,7 +365,8 @@ export class EightfoldAdapter implements ScraperAdapter {
       }
 
       ctx.logger.info('eightfold: page done', {
-        page: page + 1,
+        page: pageNumber + 1,
+        api: listingApi,
         collected: positions.length,
         reportedCount: count,
       });
@@ -202,13 +375,17 @@ export class EightfoldAdapter implements ScraperAdapter {
       if (positions.length >= maxJobs) break;
 
       // Advance by what actually came back, not by the requested `num`: the
-      // server is free to cap the page size, and assuming otherwise would skip
-      // postings silently.
-      start += batch.length;
+      // server is free to cap the page size (PCSX caps it at 10 and ignores `num`
+      // entirely), and assuming otherwise would skip postings silently.
+      start += rawCount;
       if (count > 0 && start >= count) break;
     }
 
-    ctx.logger.info('eightfold: listed', { collected: positions.length, reportedCount: count });
+    ctx.logger.info('eightfold: listed', {
+      collected: positions.length,
+      reportedCount: count,
+      api: listingApi,
+    });
 
     const capped = positions.slice(0, maxJobs);
 
@@ -316,8 +493,9 @@ export class EightfoldAdapter implements ScraperAdapter {
       const title = normalizeText(detail.name ?? detail.posting_name ?? position.name);
       if (!title) continue;
 
-      const url =
-        normalizeText(position.canonicalPositionUrl) || `https://${endpoint.domain}/careers/job/${id}`;
+      // Fall back to the careers HOST, not the corporate domain: `origin` is the
+      // site that actually serves the posting.
+      const url = normalizeText(position.canonicalPositionUrl) || `${endpoint.origin}/careers/job/${id}`;
       const applyUrl = normalizeText(detail.apply_redirect_url) || url;
 
       const location = normalizeText(detail.location ?? position.location) || undefined;
@@ -333,7 +511,7 @@ export class EightfoldAdapter implements ScraperAdapter {
       const description = descriptionHtml ? stripHtmlToText(descriptionHtml) : '';
 
       // `work_location_option` is the only remote signal this API exposes; it is
-      // null on most HSBC postings, so it stays conditional.
+      // null on most postings, so it stays conditional.
       const workLocation = normalizeText(detail.work_location_option) || undefined;
       const remote = workLocation ? /remote/i.test(workLocation) : undefined;
 

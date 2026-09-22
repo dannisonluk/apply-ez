@@ -10,6 +10,7 @@ import { CorporateCareersAdapter } from './corporate-careers.adapter.js';
 import { WorkdayAdapter } from './workday.adapter.js';
 import { EightfoldAdapter } from './eightfold.adapter.js';
 import { PhenomAdapter } from './phenom.adapter.js';
+import { OracleAdapter } from './oracle.adapter.js';
 
 const adapters: Record<string, ScraperAdapter> = {
   cathaypacific: new CathayPacificAdapter(),
@@ -36,6 +37,7 @@ const adapters: Record<string, ScraperAdapter> = {
   workday: new WorkdayAdapter(),
   eightfold: new EightfoldAdapter(),
   phenom: new PhenomAdapter(),
+  oracle: new OracleAdapter(),
 };
 
 export function getAdapter(name: string): ScraperAdapter | undefined {

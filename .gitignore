@@ -12,6 +12,9 @@ dist/
 test-results/
 playwright-report/
 
+# Scratch space for live API probes (raw JSON dumps) — never commit
+.scratch/
+
 # OS
 .DS_Store
 Thumbs.db

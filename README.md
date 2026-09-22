@@ -377,7 +377,9 @@ Auditing the targets for a structured source turned up three kinds:
 |---|---|---|
 | AIA, Manulife | Workday CXS JSON API | `POST /wday/cxs/{tenant}/{site}/jobs`, detail per posting |
 | HSBC | Eightfold `GET /api/apply/v2/jobs` | ~247 HK postings, full description per position |
+| Morgan Stanley | Eightfold PCSX `GET /api/pcsx/search` | 61 HK postings, detail per posting; page size fixed at 10 |
 | AXA | Phenom `GET /api/jobs` | full description, `posted_date`, `apply_url` |
+| CLP | Oracle Recruiting Cloud `hcmRestApi` | 39 HK postings in one request; title/date/location only |
 | Cathay | none | server-rendered, no JSON-LD, no XHR — DOM scraping is the only option |
 
 `workday.adapter.ts` is the first one built. It replaces a headless browser with two
@@ -410,6 +412,47 @@ endpoint once, keep the raw text, and let progressively more expensive parsers t
 structure it. A model is the last tier, not the first — and it can only extract what
 the fetcher actually retrieved, so a fetch that returns nothing cannot be rescued by
 a better prompt.
+
+#### Eightfold has two listing APIs, and which one answers is tenant-specific
+
+HSBC answers on the older `GET /api/apply/v2/jobs`. Morgan Stanley answers that same
+path with `403 {"message":"Not authorized for PCSX"}` — a routing verdict, not a block —
+and serves its listings from the newer `GET /api/pcsx/search` instead. Both share the
+detail endpoint `/api/apply/v2/jobs/{id}`, so this stayed one adapter with a
+`listingApi: 'auto' | 'apply-v2' | 'pcsx'` switch. Two things about PCSX:
+
+- **It ignores `num`.** Ask for 100 and you get 10, every time. Pagination therefore
+  advances by what actually came back, never by what was requested — otherwise the loop
+  advances 100 rows per page over a 10-row page and silently skips 90% of the board.
+  Morgan Stanley's 61 postings arrive as 7 pages of 10.
+- **Only `filter_*` params are forwarded** from the entry URL. `start`, `pid` and
+  `source` are dropped: they are session state, and forwarding a stale `start` makes
+  page 1 look like page 4.
+
+The auto-switch fires **only** on the PCSX-not-authorized message. A plain `403` is a
+block and stays a reported failure — switching APIs on any 403 would hide a real one.
+
+#### Oracle Recruiting Cloud, and the parameter that must be there
+
+CLP's board is Oracle HCM. Two traps, both of which look healthy from the outside:
+
+- **Omitting `expand=requisitionList.secondaryLocations` returns HTTP 200, a
+  `TotalJobsCount` of 39, and no `requisitionList` key at all.** A status-code-only
+  reader sees a clean, empty board. The adapter always sends `expand`, and treats
+  "a total was reported but zero rows came back" as an error rather than an empty page.
+- **The envelope's `limit` is not an echo of the request.** It reads `200` whether you
+  asked for 25 or for 200. Using it as the page size would end pagination after one
+  page; the loop uses `TotalJobsCount` and the returned row count instead.
+
+`siteNumber` is not in the careers URL either — CLP's page says `CLP-Recruitment-System`
+while the API wants `CX_1`. It is only discoverable in the page's JavaScript, so the
+adapter requires it in config and refuses to run without it: a wrong value returns
+**another site's** postings with a 200, which is worse than an error.
+
+CLP's detail endpoint is unreachable from this tenant (`400` on the finder, `404` on the
+single-resource form), so its postings carry title, date and location only. That is a
+real limitation, not a silent one — they are skipped by LLM enrichment, which needs a
+description, and relevance is unaffected because it reads the title.
 
 #### Politeness is part of correctness
 
@@ -505,16 +548,17 @@ Two things generalise from this:
 Run the regression checks:
 
 ```bash
-pnpm --filter @apply-ez/scraper-core check           # all nine suites, 591 assertions
+pnpm --filter @apply-ez/scraper-core check           # all ten suites, 676 assertions
 pnpm --filter @apply-ez/scraper-core check:backfill  # 40
 pnpm --filter @apply-ez/scraper-core check:hk-time   # 51
-pnpm --filter @apply-ez/scraper-core check:relevance # 148
+pnpm --filter @apply-ez/scraper-core check:relevance # 205
 pnpm --filter @apply-ez/scraper-core check:llm       # 91
 pnpm --filter @apply-ez/scraper-core check:push      # 33
 pnpm --filter @apply-ez/scraper-core check:store     # 19
 pnpm --filter @apply-ez/scraper-core check:http      # 37
 pnpm --filter @apply-ez/scraper-core check:workday   # 56
-pnpm --filter @apply-ez/scraper-core check:platform  # 59
+pnpm --filter @apply-ez/scraper-core check:platform  # 98
+pnpm --filter @apply-ez/scraper-core check:oracle    # 46
 
 pnpm --filter @apply-ez/scraper-core probe:robots    # live: is every target allowed?
 

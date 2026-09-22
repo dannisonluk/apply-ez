@@ -233,7 +233,12 @@ export const SCRAPE_TARGETS: ScrapeTarget[] = [
   {
     id: 'clp',
     name: 'CLP Careers',
-    adapter: 'corporate-careers',
+    // Oracle Recruiting Cloud REST API — no browser, one request for all 39
+    // postings. `siteNumber` is NOT in the careers URL (that says
+    // `CLP-Recruitment-System`); it is `CX_1`, which is only discoverable in the
+    // page's own JavaScript. See `oracle.adapter.ts` for why it is config rather
+    // than something the adapter guesses.
+    adapter: 'oracle',
     companyName: 'CLP',
     companySlug: 'clp',
     companyDomain: 'clp.com.hk',
@@ -242,11 +247,11 @@ export const SCRAPE_TARGETS: ScrapeTarget[] = [
     ],
     region: 'HK',
     config: {
-      platform: 'oracle',
       companyName: 'CLP',
       companyDomain: 'clp.com.hk',
-      maxPages: 3,
-      includeDetailPages: true,
+      siteNumber: 'CX_1',
+      pageLimit: 100,
+      maxJobs: 300,
       reconcileMissingJobs: true,
     },
     enabled: true,
@@ -254,20 +259,28 @@ export const SCRAPE_TARGETS: ScrapeTarget[] = [
   {
     id: 'morgan-stanley',
     name: 'Morgan Stanley Hong Kong Careers',
-    adapter: 'corporate-careers',
+    // Eightfold, but on the newer PCSX listing API: the old
+    // `/api/apply/v2/jobs` answers `403 {"message":"Not authorized for PCSX"}`.
+    // `listingApi` is pinned rather than left on the `auto` default so the probe
+    // request is not wasted on every run. The detail endpoint is still apply-v2,
+    // which is where `job_description` and the Workday `apply_redirect_url` live.
+    //
+    // Only `filter_country` is applied. The URL a human sees also carries
+    // `filter_city` and `filter_employmenttype=full+time`; the latter would drop
+    // contract roles, and the former is redundant with the country filter.
+    adapter: 'eightfold',
     companyName: 'Morgan Stanley',
     companySlug: 'morgan-stanley',
     companyDomain: 'morganstanley.com',
-    entryUrls: [
-      'https://morganstanley.eightfold.ai/careers?source=mscom&start=0&pid=549798142393&sort_by=timestamp&filter_city=Hong+Kong&filter_employmenttype=full+time&filter_country=Hong+Kong',
-    ],
+    entryUrls: ['https://morganstanley.eightfold.ai/careers?filter_country=Hong+Kong'],
     region: 'HK',
     config: {
-      platform: 'eightfold',
       companyName: 'Morgan Stanley',
       companyDomain: 'morganstanley.com',
-      maxPages: 5,
+      listingApi: 'pcsx',
+      maxJobs: 200,
       includeDetailPages: true,
+      maxDetailJobs: 200,
       reconcileMissingJobs: true,
     },
     enabled: true,

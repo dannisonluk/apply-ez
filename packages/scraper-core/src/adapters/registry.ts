@@ -6,10 +6,6 @@ import { JobsDbAdapter } from './jobsdb.adapter.js';
 import { GenericPlaywrightAdapter } from './generic.adapter.js';
 import { CathayPacificAdapter } from './cathaypacific.adapter.js';
 import { HKJCAdapter } from './hkjc.adapter.js';
-import { AIAAdapter } from './aia.adapter.js';
-import { AXAAdapter } from './axa.adapter.js';
-import { ManulifeAdapter } from './manulife.adapter.js';
-import { HSBCAdapter } from './hsbc.adapter.js';
 import { CorporateCareersAdapter } from './corporate-careers.adapter.js';
 import { WorkdayAdapter } from './workday.adapter.js';
 import { EightfoldAdapter } from './eightfold.adapter.js';
@@ -23,10 +19,6 @@ const adapters: Record<string, ScraperAdapter> = {
   // linkedin: new LinkedInAdapter(),
   generic: new GenericPlaywrightAdapter(),
   hkjc: new HKJCAdapter(),
-  aia: new AIAAdapter(),
-  axa: new AXAAdapter(),
-  manulife: new ManulifeAdapter(),
-  hsbc: new HSBCAdapter(),
   'corporate-careers': new CorporateCareersAdapter(),
   // ── platform adapters ──────────────────────────────────────────────────────
   // These read a site's own public JSON API instead of driving a browser. They
@@ -35,9 +27,12 @@ const adapters: Record<string, ScraperAdapter> = {
   // application deadline, and Eightfold's `apply_redirect_url` is the ATS link
   // the apply flow will need.
   //
-  // The per-tenant DOM adapters above (`aia`, `manulife`, `hsbc`, `axa`) are
-  // superseded by these and are no longer referenced by any target. They are left
-  // registered for now rather than deleted; see the README for the audit.
+  // The per-tenant DOM adapters these replaced (`aia`, `manulife`, `hsbc`, `axa`)
+  // are deleted rather than kept as a fallback. A Playwright fallback for a tenant
+  // with a working API is not a safety net: it is a second code path nobody
+  // exercises, reading the same data less accurately, that would silently take
+  // over on any parse failure. The per-tenant quirks they encoded are still in
+  // git history if an API ever changes shape.
   workday: new WorkdayAdapter(),
   eightfold: new EightfoldAdapter(),
   phenom: new PhenomAdapter(),

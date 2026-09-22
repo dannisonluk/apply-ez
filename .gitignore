@@ -1,0 +1,20 @@
+node_modules/
+dist/
+.turbo/
+*.tsbuildinfo
+
+# Never commit secrets
+.env
+.env.local
+.env.*.local
+
+# Playwright
+test-results/
+playwright-report/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local AI working notes — not part of the public repo
+.workbuddy-ai/

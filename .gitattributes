@@ -1,0 +1,10 @@
+# The scraper runs on Linux CI, but is developed on Windows. Force LF in the
+# repository so shell steps in .github/workflows never pick up CRLF, which would
+# make bash fail with "bad interpreter" style errors.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.pdf binary
+*.woff binary
+*.woff2 binary

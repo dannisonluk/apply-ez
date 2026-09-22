@@ -1,0 +1,101 @@
+name: Scrape jobs
+
+# Every 4 hours, one job per target so a single broken careers site cannot take
+# down the whole run.
+#
+# IMPORTANT: this repository must stay PUBLIC. GitHub Actions is only unlimited on
+# public repositories — a private repo gets 2,000 minutes/month on the Free plan,
+# and 12 targets x 6 runs/day would consume roughly 3,000-4,500 minutes/month.
+#
+# Cron is UTC. `0 */4 * * *` fires at 00:00/04:00/08:00/12:00/16:00/20:00 UTC,
+# i.e. 08:00/12:00/16:00/20:00/00:00/04:00 Hong Kong time.
+
+on:
+  schedule:
+    - cron: '0 */4 * * *'
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: 'Space-separated target ids (blank = all). See packages/scraper-core/src/targets.ts'
+        required: false
+        default: ''
+
+concurrency:
+  # Never let a slow run overlap with the next tick.
+  group: scrape-incremental
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    name: scrape ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - cathay-pacific
+          - aia
+          - axa
+          - manulife
+          - hsbc
+          - hk-express
+          - swire-group
+          - towngas
+          - mtr
+          - clp
+          - morgan-stanley
+          - shkp
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Install Chromium
+        run: pnpm --filter @apply-ez/scraper-core exec playwright install --with-deps chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+
+      - name: Install Chromium (system deps only, browsers cached)
+        run: pnpm --filter @apply-ez/scraper-core exec playwright install-deps chromium
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+
+      - name: Scrape ${{ matrix.target }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # Optional. Without it the scraper still runs; new jobs just stay at
+          # enrich_status = PENDING and are picked up on a later run.
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          LOG_LEVEL: info
+          SCRAPER_MIN_TIME_MS: '1000'
+          SCRAPER_MAX_CONCURRENT: '2'
+          OPENROUTER_MAX_JOBS_PER_RUN: '40'
+          OPENROUTER_CONCURRENCY: '2'
+        run: |
+          TARGETS="${{ github.event.inputs.targets }}"
+          if [ -n "$TARGETS" ]; then
+            echo "$TARGETS" | tr ' ' '\n' | grep -qx "${{ matrix.target }}" || {
+              echo "skipping ${{ matrix.target }} (not in manual target list)"
+              exit 0
+            }
+          fi
+          pnpm --filter @apply-ez/scraper-core exec tsx src/cli.ts --target=${{ matrix.target }}

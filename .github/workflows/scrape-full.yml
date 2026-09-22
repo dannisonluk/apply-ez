@@ -1,0 +1,89 @@
+name: Scrape jobs (full crawl + reconcile)
+
+# Daily deep crawl. Unlike the 4-hourly incremental run, this ignores the
+# per-target maxPages/maxJobs caps and then reconciles: jobs absent from a full
+# crawl get missing_count incremented, and are marked EXPIRED on the second
+# consecutive miss.
+#
+# Reconcile only runs here. A shallow paginated run would falsely expire
+# older-but-still-live postings.
+#
+# `20 19 * * *` UTC = 03:20 Hong Kong time.
+
+on:
+  schedule:
+    - cron: '20 19 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: scrape-full
+  cancel-in-progress: false
+
+jobs:
+  scrape-full:
+    name: full crawl ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - cathay-pacific
+          - aia
+          - axa
+          - manulife
+          - hsbc
+          - hk-express
+          - swire-group
+          - towngas
+          - mtr
+          - clp
+          - morgan-stanley
+          - shkp
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Install Chromium
+        run: pnpm --filter @apply-ez/scraper-core exec playwright install --with-deps chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+
+      - name: Install Chromium (system deps only, browsers cached)
+        run: pnpm --filter @apply-ez/scraper-core exec playwright install-deps chromium
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+
+      - name: Full crawl ${{ matrix.target }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # A full crawl surfaces postings the incremental run never paginated to,
+          # so those are genuinely new and do get summarised. The per-run cap keeps
+          # one big crawl from draining the free-tier daily quota.
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          LOG_LEVEL: info
+          SCRAPER_MIN_TIME_MS: '1000'
+          SCRAPER_MAX_CONCURRENT: '2'
+          SCRAPER_EXPIRE_AFTER_MISSING_RUNS: '2'
+          OPENROUTER_MAX_JOBS_PER_RUN: '40'
+          OPENROUTER_CONCURRENCY: '2'
+        run: pnpm --filter @apply-ez/scraper-core exec tsx src/cli.ts --target=${{ matrix.target }} --full

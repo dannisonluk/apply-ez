@@ -1,0 +1,32 @@
+{
+  "name": "@apply-ez/scraper-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone job scraper core: adapters, normalization pipeline, and Supabase ingest",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "install:browsers": "playwright install --with-deps chromium",
+    "scrape": "tsx src/cli.ts",
+    "scrape:dry": "tsx src/cli.ts --dry-run",
+    "check": "tsx scripts/check-backfill.ts && tsx scripts/check-llm.ts",
+    "check:backfill": "tsx scripts/check-backfill.ts",
+    "check:llm": "tsx scripts/check-llm.ts"
+  },
+  "dependencies": {
+    "bottleneck": "^2.19.5",
+    "pino": "^9.6.0",
+    "playwright": "^1.50.0",
+    "robots-parser": "^3.0.1",
+    "undici": "^6.21.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

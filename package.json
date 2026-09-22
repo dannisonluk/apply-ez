@@ -1,0 +1,24 @@
+{
+  "name": "apply-ez",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.0.0",
+  "description": "Job scraping + assisted auto-apply for Hong Kong corporate careers sites",
+  "scripts": {
+    "typecheck": "pnpm -r typecheck",
+    "build": "pnpm -r build",
+    "scrape": "pnpm --filter @apply-ez/scraper-core scrape",
+    "scrape:dry": "pnpm --filter @apply-ez/scraper-core scrape:dry",
+    "install:browsers": "pnpm --filter @apply-ez/scraper-core install:browsers"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  },
+  "engines": {
+    "node": ">=20.11.0",
+    "pnpm": ">=10.0.0"
+  }
+}

@@ -6,6 +6,7 @@ import {
   type JobIngest,
 } from '../types/index.js';
 import { parseHongKongDateTime } from './hk-time.js';
+import { isOutOfScopeLocation } from './location-scope.js';
 
 /**
  * Normalizes raw adapter output before it reaches API validation.
@@ -20,18 +21,33 @@ export interface JobPipelineLogger {
 }
 
 export interface PipelineDroppedJob {
-  stage: 'normalize' | 'validate' | 'dedupe';
+  stage: 'normalize' | 'validate' | 'scope' | 'dedupe';
   reason: string;
   source?: string | undefined;
   externalId?: string | undefined;
   title?: string | undefined;
   url?: string | undefined;
+  /** Set for `stage: 'scope'` — the location that put the job out of scope. */
+  location?: string | undefined;
 }
 
 export interface PrepareJobsResult {
   jobs: JobIngest[];
   dropped: PipelineDroppedJob[];
   duplicateCount: number;
+}
+
+export interface PrepareJobsOptions {
+  logger?: JobPipelineLogger;
+  /**
+   * Drop postings that are not in Hong Kong.
+   *
+   * Off by default, because this is a product decision rather than data hygiene:
+   * the normalizer's job is to make rows valid, not to decide which of them the
+   * board wants. `cli.ts` turns it on for every target. See `location-scope.ts`
+   * for why the rule is a denylist.
+   */
+  hongKongOnly?: boolean | undefined;
 }
 
 const WORK_ARRANGEMENT_VALUES: ReadonlySet<
@@ -285,7 +301,7 @@ function normalizeSingleJob(input: Record<string, unknown>): JobIngest | null {
 
 export function prepareJobsForIngest(
   jobs: unknown[],
-  options: { logger?: JobPipelineLogger } = {},
+  options: PrepareJobsOptions = {},
 ): PrepareJobsResult {
   const dropped: PipelineDroppedJob[] = [];
   const valid: JobIngest[] = [];
@@ -316,6 +332,22 @@ export function prepareJobsForIngest(
         externalId: normalized.externalId,
         title: normalized.title,
         url: normalized.url,
+      });
+      continue;
+    }
+
+    // Scope, not hygiene: the listing APIs filter by location themselves and
+    // still return the odd overseas posting. Checked after validation so it reads
+    // the normalized `location` rather than the adapter's raw string.
+    if (options.hongKongOnly && isOutOfScopeLocation(parseResult.data.location)) {
+      dropped.push({
+        stage: 'scope',
+        reason: 'location is outside Hong Kong',
+        source: parseResult.data.source,
+        externalId: parseResult.data.externalId,
+        title: parseResult.data.title,
+        url: parseResult.data.url,
+        location: parseResult.data.location,
       });
       continue;
     }

@@ -17,7 +17,7 @@
     "probe:target": "tsx scripts/probe-target.ts",
     "probe:robots": "tsx scripts/probe-robots.ts",
     "why:filtered": "tsx scripts/why-filtered.ts",
-    "check": "tsx scripts/check-backfill.ts && tsx scripts/check-hk-time.ts && tsx scripts/check-relevance.ts && tsx scripts/check-llm.ts && tsx scripts/check-push.ts && tsx scripts/check-store.ts && tsx scripts/check-http.ts && tsx scripts/check-workday.ts && tsx scripts/check-platform-adapters.ts && tsx scripts/check-oracle.ts",
+    "check": "tsx scripts/check-backfill.ts && tsx scripts/check-hk-time.ts && tsx scripts/check-location.ts && tsx scripts/check-relevance.ts && tsx scripts/check-llm.ts && tsx scripts/check-push.ts && tsx scripts/check-store.ts && tsx scripts/check-http.ts && tsx scripts/check-workday.ts && tsx scripts/check-platform-adapters.ts && tsx scripts/check-oracle.ts",
     "check:backfill": "tsx scripts/check-backfill.ts",
     "check:hk-time": "tsx scripts/check-hk-time.ts",
     "check:relevance": "tsx scripts/check-relevance.ts",
@@ -27,6 +27,7 @@
     "check:http": "tsx scripts/check-http.ts",
     "check:workday": "tsx scripts/check-workday.ts",
     "check:platform": "tsx scripts/check-platform-adapters.ts",
+    "check:location": "tsx scripts/check-location.ts",
     "check:oracle": "tsx scripts/check-oracle.ts"
   },
   "dependencies": {

@@ -8,7 +8,7 @@ for the full architecture, hosting comparison, and auto-apply feasibility analys
 
 ## What this does
 
-- Scrapes 12 Hong Kong employer careers sites every 4 hours via GitHub Actions
+- Scrapes 12 Hong Kong employer careers sites every 6 hours via GitHub Actions
 - Normalises, de-duplicates, backfills missing fields, and enriches each posting
 - Scores every job 0-100 for relevance by role family, so cabin crew and bar work
   do not drown the list — scored, never dropped
@@ -109,7 +109,7 @@ Add repository secrets `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and
 `OPENROUTER_API_KEY` (optional — without it new jobs stay `PENDING` and are
 summarised on a later run). `EXPO_ACCESS_TOKEN` is only needed if Enhanced Push
 Security is enabled on the Expo project.
-`.github/workflows/scrape.yml` then runs every 4 hours.
+`.github/workflows/scrape.yml` then runs every 6 hours.
 
 > **The repository must stay public.** GitHub Actions is unlimited only on public
 > repos. A private repo on the Free plan gets 2,000 minutes/month, and 12 targets
@@ -135,7 +135,7 @@ adapter.scrape()
 
 **The database write comes before the LLM stage, deliberately.** Enrichment is the
 slowest and least reliable step in a run — a free-tier model can be rate-limited,
-geo-blocked, or absent entirely — and a 4-hourly ingest must never be held up by
+geo-blocked, or absent entirely — and a 6-hourly ingest must never be held up by
 it. Rows land with `enrich_status = 'PENDING'` and are patched afterwards; anything
 the model did not reach stays `PENDING` and is retried on the next run, which is
 already how the retry mechanism worked. The `jobs written` log line is emitted
@@ -211,6 +211,30 @@ calling fails about one in five hundred.
 - Validation is strict about *presence* and lenient about *format*: a malformed
   `deadline` drops that one field instead of discarding an otherwise good summary.
 
+### The one-off backlog
+
+The first full crawl writes every posting with `enrich_status = 'PENDING'`, and the
+free tier only allows 50 model requests per day — so a 740-row backlog would take
+about two weeks to summarise at that rate.
+
+For that first pass the rows were filled in **without a model**, by deriving
+`summary` / `extracted` from metadata the row already carried (`yearsOfExperience`,
+`contractType`, `department`, `jobFunction`, the `remote` flag) plus the title. That
+is enough to make the app's summary, skill search and years-of-experience filter work
+immediately, and it costs nothing.
+
+Those rows are deliberately left at `PENDING` with
+`enrich_model = 'heuristic:local-v1'`, which means:
+
+- the app shows the summary straight away, labelled *(pending)* — accurate, because
+  it is provisional;
+- `listEnrichmentPendingIds` still returns them, so the normal run replaces them with
+  a summary actually read off the job description, at 50/day, in the background;
+- a later model failure leaves the derived summary in place rather than blanking it.
+
+Nothing is foreclosed, and a model-produced summary is always distinguishable from a
+derived one in the data.
+
 ## New-job detection
 
 The one rule the whole product depends on:
@@ -228,6 +252,32 @@ new  ==  first_seen_at > lastOpenedAt
   flagged for this session, and the flag clears the next time you open the app.
 - On first launch there is no baseline, so nothing is flagged — the badge starts
   honest at zero rather than claiming the entire backlog is new.
+
+## Hong Kong scope
+
+Every target is HK-scoped at the source — Workday's `locationCountry`, Phenom's
+`location=Hong Kong`, Eightfold's `filter_country=Hong Kong`, PageUp's
+`location=Hong Kong SAR`. Those filters leak, and not in a way a target-level tweak
+can fix, because the leak is inside the listing API's own filtering: a live crawl of
+746 postings contained **6 that were not in Hong Kong** — two "Singapore", one
+"Manulife Tower, Manulife (Singapore) Pte Ltd" and three "华东" from SHKP's Shanghai
+roles.
+
+`lib/location-scope.ts` is a **denylist**, applied to every target in `cli.ts`:
+
+```
+out of scope  ==  names somewhere outside Hong Kong
+                  AND does not name Hong Kong
+```
+
+An allowlist ("must mention Hong Kong") is the obvious implementation and the wrong
+one — it drops legitimate postings whose location is an office name with no city in
+it. `Manulife Tower` is a Kwun Tong address. A denylist errs the other way: an
+unrecognised overseas location still leaks, which is visible, countable, and cheap to
+fix by adding a pattern, rather than silently deleting a job you wanted.
+
+Drops are logged with their locations, because the only way to know the list is still
+adequate is to see what it rejected.
 
 ## Push notifications
 
@@ -548,9 +598,10 @@ Two things generalise from this:
 Run the regression checks:
 
 ```bash
-pnpm --filter @apply-ez/scraper-core check           # all ten suites, 676 assertions
+pnpm --filter @apply-ez/scraper-core check           # all eleven suites, 711 assertions
 pnpm --filter @apply-ez/scraper-core check:backfill  # 40
 pnpm --filter @apply-ez/scraper-core check:hk-time   # 51
+pnpm --filter @apply-ez/scraper-core check:location  # 35
 pnpm --filter @apply-ez/scraper-core check:relevance # 205
 pnpm --filter @apply-ez/scraper-core check:llm       # 91
 pnpm --filter @apply-ez/scraper-core check:push      # 33

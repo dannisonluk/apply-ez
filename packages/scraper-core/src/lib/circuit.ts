@@ -49,7 +49,7 @@ export class FailureCircuit {
    * onto a host that is still refusing — the opposite of the intent.
    *
    * Recovery is not this class's job: a run that has tripped the circuit reports
-   * a partial result and tries again in four hours, which is both simpler and
+   * a partial result and tries again in six hours, which is both simpler and
    * kinder to the host than probing for recovery.
    */
   get isOpen(): boolean {

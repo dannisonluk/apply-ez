@@ -3,7 +3,7 @@
  *
  * In the original `ineedajob` monorepo these lived in the `ScraperTarget` DB table
  * and were polled by a node-cron scheduler. For a standalone scraper they are plain
- * config: the GitHub Actions workflow runs every 4 hours and fans out one job per
+ * config: the GitHub Actions workflow runs every 6 hours and fans out one job per
  * target via the `--target=<id>` CLI flag, so per-target crons are no longer needed.
  *
  * The `config` objects are carried over verbatim from the original seed so adapter

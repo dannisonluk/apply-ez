@@ -188,6 +188,18 @@ async function runTarget(
   const startedAt = new Date().toISOString();
   const targetLogger = logger.child({ target: target.id, adapter: target.adapter });
 
+  // The enrich logger takes (message, context); pino takes (context, message).
+  // Passing pino straight through is accepted and silently drops every structured
+  // field, which is how enrichment failures became unreadable — the log said
+  // "leaving PENDING" and nothing else, with no model, no external id and no
+  // reason. The adapter loggers above are swapped the same way.
+  const enrichLogger = {
+    info: (message: string, context?: Record<string, unknown>) =>
+      targetLogger.info(context ?? {}, message),
+    warn: (message: string, context?: Record<string, unknown>) =>
+      targetLogger.warn(context ?? {}, message),
+  };
+
   const config: Record<string, unknown> = {
     ...target.config,
     ...(options.full ? { fullCrawl: true } : {}),
@@ -212,8 +224,14 @@ async function runTarget(
   // 1. Backfill gaps BEFORE the pipeline strips description text.
   const backfilled = backfillRawJobs(scraped.jobs, { locationFallback: 'Hong Kong' });
 
-  // 2. Normalize + validate + de-duplicate.
+  // 2. Normalize + validate + scope + de-duplicate.
+  //
+  // `hongKongOnly` is on for every target: this board is a Hong Kong job board, and
+  // the per-target location filters the adapters rely on are not airtight. See
+  // `lib/location-scope.ts` for the leak that motivated it and why the rule is a
+  // denylist rather than an allowlist.
   const prepared = prepareJobsForIngest(backfilled.jobs, {
+    hongKongOnly: true,
     logger: {
       warn: (message, context) => targetLogger.warn(context ?? {}, message),
     },
@@ -230,10 +248,16 @@ async function runTarget(
   //    the model's seniority / YOE reading is available.
   const relevance = applyRelevance(jobs);
 
+  // Reported with their locations, because the only way to know the denylist is
+  // still adequate is to see what it rejected. A silent drop here would be
+  // indistinguishable from an adapter that found nothing.
+  const outOfScope = prepared.dropped.filter((entry) => entry.stage === 'scope');
+
   targetLogger.info(
     {
       scraped: scraped.jobs.length,
       dropped: prepared.dropped.length,
+      outOfScope: outOfScope.length,
       duplicates: prepared.duplicateCount,
       ready: jobs.length,
       adapterErrors: scraped.errors.length,
@@ -247,6 +271,19 @@ async function runTarget(
     },
     'pipeline completed',
   );
+
+  if (outOfScope.length > 0) {
+    targetLogger.warn(
+      {
+        count: outOfScope.length,
+        samples: outOfScope.slice(0, 10).map((entry) => ({
+          title: entry.title,
+          location: entry.location,
+        })),
+      },
+      'dropped postings outside Hong Kong',
+    );
+  }
 
   if (scraped.errors.length > 0) {
     targetLogger.warn({ errors: scraped.errors.slice(0, 5) }, 'adapter reported errors');
@@ -288,7 +325,7 @@ async function runTarget(
     // Enrichment also runs in dry-run mode so the prompt and the chosen model can
     // be evaluated without writing anything.
     if (options.enrich) {
-      const enrichOptions = defaultEnrichOptions(targetLogger);
+      const enrichOptions = defaultEnrichOptions(enrichLogger);
       if (!enrichOptions) {
         targetLogger.warn('OPENROUTER_API_KEY is not set — skipping LLM enrichment');
       } else {
@@ -325,7 +362,7 @@ async function runTarget(
   // ── Write first, enrich second ──────────────────────────────────────────────
   // The database write deliberately happens BEFORE the LLM stage. Enrichment is
   // the slowest and least reliable step of a run — a free-tier model can be rate
-  // limited, geo-blocked or simply absent — and a 4-hourly ingest must never be
+  // limited, geo-blocked or simply absent — and a 6-hourly ingest must never be
   // held up by it. Rows land with `enrich_status = 'PENDING'` and are patched in
   // below; anything the model did not reach stays PENDING and is retried on the
   // next run, which is already how the retry mechanism works.
@@ -357,7 +394,7 @@ async function runTarget(
   }
 
   if (options.enrich) {
-    const enrichOptions = defaultEnrichOptions(targetLogger);
+    const enrichOptions = defaultEnrichOptions(enrichLogger);
     if (!enrichOptions) {
       targetLogger.warn('OPENROUTER_API_KEY is not set — skipping LLM enrichment');
     } else {

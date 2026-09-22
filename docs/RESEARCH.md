@@ -1,6 +1,6 @@
 # apply-ez — 研究與架構方案
 
-> 目標：由 `ineedajob` 抽出 job scraper，打造成 Android app —— 每 4 小時自動爬工作、列出新職位，加一層 LLM 摘要 / 抽取，並支援「用戶揀選後自動申請」。
+> 目標：由 `ineedajob` 抽出 job scraper，打造成 Android app —— 每 6 小時自動爬工作、列出新職位，加一層 LLM 摘要 / 抽取，並支援「用戶揀選後自動申請」。
 > 日期：2026-09-22
 
 ---
@@ -48,7 +48,7 @@
 
 | 路徑 | 現況 | 換成 |
 |---|---|---|
-| `src/main.ts` | node-cron + BullMQ + Prisma `ScraperTarget` 表驅動 | GitHub Actions scheduled workflow（每 4 小時） |
+| `src/main.ts` | node-cron + BullMQ + Prisma `ScraperTarget` 表驅動 | GitHub Actions scheduled workflow（每 6 小時） |
 | `src/queue/scrape-queue.ts` | BullMQ + Redis | 直接刪除 |
 | `src/lib/api-client.ts` | POST 去 `services/api` 嘅 `/internal/jobs/ingest` | 直接寫 Supabase（或經 PostgREST） |
 | `packages/db` | Prisma + Postgres + 20+ 業務表（評論／討論區／訂閱…） | 精簡 schema，只留 companies / jobs / runs / applications |
@@ -57,8 +57,8 @@
 
 Cathay Pacific、AIA、AXA、Manulife、HSBC、HK Express、Swire、Towngas、MTR、CLP、Morgan Stanley、SHKP
 
-- 現時每個 target 有自己嘅 cron（`30 */6`、`40 */6`…），即每 6 小時一次
-- 改成每 4 小時：統一 `0 */4 * * *` 即可
+- 現時每個 target 有自己嘅 cron（`30 */4`、`40 */4`…），即每 4 小時一次
+- 改成統一 `0 */6 * * *`（原訂 `0 */4 * * *`；2026-09-23 起改為 6 小時一次）
 - `config` 內有 `maxPages` / `maxJobs` / `includeDetailPages` / `fullCrawl` 等參數，可直接沿用
 - `includeDetailPages` 會開多一個 page 抓詳情 → 時間同成本主要來源，亦係 LLM 摘要嘅資料來源（需要 JD 全文）
 
@@ -80,7 +80,7 @@ Cathay Pacific、AIA、AXA、Manulife、HSBC、HK Express、Swire、Towngas、MT
 ### 3.1 全流程
 
 ```
-① Scheduler        GitHub Actions schedule: cron '0 */4 * * *'
+① Scheduler        GitHub Actions schedule: cron '0 */6 * * *'
         ↓
 ② Scraper          12 個 adapter（Playwright headless chromium）
         ↓
@@ -263,7 +263,7 @@ Nemotron 唯一優勢係 1.0M context 同 3B active（理論上 free tier 容量
 | Cloudflare D1 | 5GB SQLite、500 萬行讀/日 | ✅ 同 R2/Workers 同生態，但係 SQLite |
 
 容量估算：每條 job 約 1–2KB，500MB ≈ 25–50 萬條。對 12 間公司嚟講極度充裕。
-⚠️ Supabase Free 7 日冇 API 請求會 pause —— 但每 4 小時都有寫入，唔會中。
+⚠️ Supabase Free 7 日冇 API 請求會 pause —— 但每 6 小時都有寫入，唔會中。
 
 ### 5.3 Resume 儲存
 
@@ -355,7 +355,7 @@ App 撳「申請」（揀 resume）
 | 階段 | 內容 | 產出 |
 |---|---|---|
 | **P0** | 抽 scraper 成獨立 package，本地跑通 12 個 adapter | `packages/scraper-core` |
-| **P1** | GitHub Actions cron + Supabase + R2；4 小時一次；new-job diff | 全自動 pipeline |
+| **P1** | GitHub Actions cron + Supabase + R2；6 小時一次；new-job diff | 全自動 pipeline |
 | **P2** | LLM 層：Qwen3.8 27B（tool calling）+ Zod 驗證 + Nemotron fallback | 摘要 + 結構化欄位 |
 | **P3** | Expo app：新工列表、新工 badge、詳情頁、Expo Push | 可安裝 app |
 | **P4** | 3 份 resume 管理 + 輔助填表（WebView autofill） | 一鍵填表 |

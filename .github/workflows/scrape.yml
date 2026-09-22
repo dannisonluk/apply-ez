@@ -1,18 +1,18 @@
 name: Scrape jobs
 
-# Every 4 hours, one job per target so a single broken careers site cannot take
+# Every 6 hours, one job per target so a single broken careers site cannot take
 # down the whole run.
 #
 # IMPORTANT: this repository must stay PUBLIC. GitHub Actions is only unlimited on
 # public repositories — a private repo gets 2,000 minutes/month on the Free plan,
-# and 12 targets x 6 runs/day would consume roughly 3,000-4,500 minutes/month.
+# and 12 targets x 4 runs/day would exhaust that within days.
 #
-# Cron is UTC. `0 */4 * * *` fires at 00:00/04:00/08:00/12:00/16:00/20:00 UTC,
-# i.e. 08:00/12:00/16:00/20:00/00:00/04:00 Hong Kong time.
+# Cron is UTC. `0 */6 * * *` fires at 00:00/06:00/12:00/18:00 UTC,
+# i.e. 08:00/14:00/20:00/02:00 Hong Kong time.
 
 on:
   schedule:
-    - cron: '0 */4 * * *'
+    - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
       targets:

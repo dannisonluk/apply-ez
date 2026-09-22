@@ -1,12 +1,13 @@
 /**
  * Row shapes as they arrive from Supabase PostgREST.
  *
- * These mirror `supabase/migrations/0001_init.sql`. They are hand-written rather
- * than generated because the app is a separate npm project from the scraper and
- * pulling in a codegen step for six tables would cost more than it saves.
+ * These mirror `supabase/migrations/0001_init.sql` and `0003_...sql`. They are
+ * hand-written rather than generated because the app is a separate npm project from
+ * the scraper and pulling in a codegen step for six tables would cost more than it
+ * saves.
  *
- * If you change the migration, change this file. The field names are the ones the
- * app actually reads, so a rename shows up as a type error at the read site.
+ * If you change a migration, change this file. The field names are the ones the app
+ * actually reads, so a rename shows up as a type error at the read site.
  */
 
 export type EmploymentType = 'PERMANENT' | 'CONTRACT' | 'INTERNSHIP';
@@ -80,7 +81,13 @@ export interface JobRow {
   /** The ONLY signal for "this job is new". Set by the DB default on INSERT. */
   first_seen_at: string;
   last_seen_at: string;
+  /** `ACTIVE` | `EXPIRED`. EXPIRED is set by the full-crawl reconcile. */
   status: string;
+
+  /** 0-100, computed by the scraper. See `lib/relevance.ts` in scraper-core. */
+  relevance_score: number;
+  role_family: string | null;
+  filter_reason: string | null;
 
   summary: string | null;
   summary_lang: string | null;
@@ -93,6 +100,20 @@ export interface JobRow {
   companies: CompanyRef | CompanyRef[] | null;
 }
 
+/** A row returned by the `list_applications` RPC — an application joined with its job. */
+export interface AppliedJob {
+  job_id: string;
+  status: string;
+  resume_key: string | null;
+  applied_at: string;
+  evidence_url: string | null;
+  notes: string | null;
+  title: string;
+  company_name: string | null;
+  url: string;
+  job_status: string;
+}
+
 /** PostgREST can return an embedded to-one relation as an object or a 1-element
  *  array depending on how the FK is inferred. Normalise it at the boundary so no
  *  screen has to care. */
@@ -103,6 +124,8 @@ export function companyOf(row: JobRow): CompanyRef | null {
 }
 
 // ─── derived view model ──────────────────────────────────────────────────────
+
+export type RelevanceBand = 'high' | 'medium' | 'low' | 'filtered';
 
 export interface JobView {
   id: string;
@@ -136,12 +159,42 @@ export interface JobView {
   publishedAt: string;
   enrichStatus: JobRow['enrich_status'];
   isNew: boolean;
+
+  /** 0-100 fit score. Higher is a better match for a tech / data / business profile. */
+  relevanceScore: number;
+  roleFamily: string | null;
+  /** Why the score is low, e.g. `blocklist:bartender` or `family:AVIATION_OPS`. */
+  filterReason: string | null;
+  relevanceBand: RelevanceBand;
+
+  /** True when the reconcile marked the posting EXPIRED. */
+  isExpired: boolean;
+  /** True when an application has been recorded for this job. */
+  applied: boolean;
 }
 
-export function toJobView(row: JobRow, newSince: number | null): JobView {
+/** Mirrors `DEFAULT_MIN_RELEVANCE` in the scraper. Adjustable in Settings. */
+export const DEFAULT_MIN_RELEVANCE = 35;
+
+export function relevanceBandOf(score: number, threshold: number): RelevanceBand {
+  if (score >= 70) return 'high';
+  if (score >= threshold) return 'medium';
+  if (score > 0) return 'low';
+  return 'filtered';
+}
+
+export function toJobView(
+  row: JobRow,
+  newSince: number | null,
+  options: { appliedJobIds?: Set<string>; minRelevance?: number } = {},
+): JobView {
   const company = companyOf(row);
   const extracted = row.extracted ?? {};
   const firstSeenMs = Date.parse(row.first_seen_at);
+  const minRelevance = options.minRelevance ?? DEFAULT_MIN_RELEVANCE;
+  // Rows written before migration 0003 have no score; the column default is 50, but
+  // a cached payload from an older schema could still be undefined.
+  const relevanceScore = typeof row.relevance_score === 'number' ? row.relevance_score : 50;
 
   const salary =
     row.salary_min !== null || row.salary_max !== null
@@ -181,9 +234,15 @@ export function toJobView(row: JobRow, newSince: number | null): JobView {
     firstSeenAt: row.first_seen_at,
     publishedAt: row.published_at,
     enrichStatus: row.enrich_status,
-    // A job is "new" relative to when the user last opened the list. When there
-    // is no baseline yet (first launch) nothing is flagged, so the badge starts
-    // honest at zero instead of claiming the whole backlog is new.
+    // A job is "new" relative to when the user last opened the list. When there is
+    // no baseline yet (first launch) nothing is flagged, so the badge starts honest
+    // at zero instead of claiming the whole backlog is new.
     isNew: newSince !== null && Number.isFinite(firstSeenMs) && firstSeenMs > newSince,
+    relevanceScore,
+    roleFamily: row.role_family,
+    filterReason: row.filter_reason,
+    relevanceBand: relevanceBandOf(relevanceScore, minRelevance),
+    isExpired: row.status === 'EXPIRED',
+    applied: options.appliedJobIds?.has(row.id) ?? false,
   };
 }

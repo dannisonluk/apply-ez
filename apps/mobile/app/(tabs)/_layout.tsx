@@ -2,11 +2,13 @@ import { Ionicons } from '@expo/vector-icons';
 import { Tabs } from 'expo-router';
 import React from 'react';
 import { useJobs } from '../../src/state/jobs';
+import { useSession } from '../../src/state/session';
 import { useTheme } from '../../src/theme';
 
 export default function TabsLayout(): React.JSX.Element {
   const theme = useTheme();
   const { newCount } = useJobs();
+  const { applications } = useSession();
 
   return (
     <Tabs
@@ -35,6 +37,23 @@ export default function TabsLayout(): React.JSX.Element {
           tabBarBadgeStyle: {
             backgroundColor: theme.color.newBadge,
             color: theme.color.onNewBadge,
+            fontSize: 10,
+            fontWeight: '800',
+          },
+        }}
+      />
+      <Tabs.Screen
+        name="applications"
+        options={{
+          title: 'Applied',
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="checkmark-done-outline" size={size} color={color} />
+          ),
+          // Only meaningful once unlocked; the screen itself shows the lock prompt.
+          tabBarBadge: applications.length > 0 ? applications.length : undefined,
+          tabBarBadgeStyle: {
+            backgroundColor: theme.color.success,
+            color: theme.color.onPrimary,
             fontSize: 10,
             fontWeight: '800',
           },

@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import pino from 'pino';
 import { getAdapter } from './adapters/registry.js';
 import type { ScrapeContext } from './adapters/adapter.interface.js';
@@ -7,9 +9,38 @@ import { prepareJobsForIngest } from './lib/job-pipeline.js';
 import { standardizeJobs } from './lib/job-standardizer.js';
 import { defaultEnrichOptions, enrichJobs } from './lib/llm/enrich.js';
 import type { StoredInsight } from './lib/llm/schema.js';
+import { DEFAULT_MIN_RELEVANCE, scoreRelevance } from './lib/relevance.js';
 import { notifyNewJobs } from './notify.js';
 import { JobStore } from './store.js';
+import type { JobIngest } from './types/index.js';
 import { enabledTargets, getTarget, SCRAPE_TARGETS, type ScrapeTarget } from './targets.js';
+
+/**
+ * Load `.env` before anything reads `process.env`.
+ *
+ * Must run before the logger below, which captures LOG_LEVEL at module scope.
+ * In CI there is no `.env` and the real environment variables are used instead, so
+ * a missing file is not an error.
+ */
+function loadDotEnv(): void {
+  if (typeof process.loadEnvFile !== 'function') return;
+  // Depends on the working directory: the package root when run via pnpm, the
+  // repository root when run from there.
+  for (const candidate of [
+    resolve(process.cwd(), '.env'),
+    resolve(process.cwd(), '../../.env'),
+  ]) {
+    if (!existsSync(candidate)) continue;
+    try {
+      process.loadEnvFile(candidate);
+      return;
+    } catch {
+      // Unreadable or malformed: fall through and rely on the real environment.
+    }
+  }
+}
+
+loadDotEnv();
 
 /** Every target here is the company's own careers site. */
 const JOB_SOURCE = 'COMPANY_WEBSITE';
@@ -84,6 +115,65 @@ interface TargetRunResult {
   enrichFailed: number;
   enrichSkipped: number;
   pushed: number;
+  relevance: RelevanceStats;
+}
+
+export interface RelevanceStats {
+  scored: number;
+  /** Jobs at or above the display threshold. */
+  relevant: number;
+  /** Jobs below it — still written, just hidden by default in the app. */
+  filtered: number;
+  /** Jobs that hit the hard blocklist (score 0). */
+  blocklisted: number;
+  byFamily: Record<string, number>;
+  minRelevance: number;
+}
+
+/**
+ * Score every job's relevance and write the result onto the ingest payload.
+ *
+ * Deliberately a pure annotation step: nothing is dropped, and a low score is
+ * recorded alongside the reason that produced it. Deleting rows here would make a
+ * mis-tuned rule silently lose a job you wanted, with nothing left to debug.
+ *
+ * When `insights` is supplied the LLM's seniority / years-of-experience take
+ * precedence over the deterministic guesses, because the model has read the JD.
+ */
+function applyRelevance(
+  jobs: JobIngest[],
+  insights?: Map<string, StoredInsight> | undefined,
+): RelevanceStats {
+  const byFamily: Record<string, number> = {};
+  const minRelevance = Number.parseInt(process.env.JOB_MIN_RELEVANCE ?? '', 10);
+  const threshold = Number.isFinite(minRelevance) ? minRelevance : DEFAULT_MIN_RELEVANCE;
+
+  let relevant = 0;
+  let filtered = 0;
+  let blocklisted = 0;
+
+  for (const job of jobs) {
+    const insight = insights?.get(job.externalId);
+
+    const result = scoreRelevance({
+      title: job.title,
+      department: job.department ?? null,
+      seniority: insight?.seniority ?? job.classification?.seniority ?? null,
+      yoeMin: insight?.yoeMin ?? job.experienceMin ?? null,
+    });
+
+    job.relevanceScore = result.score;
+    job.roleFamily = result.family;
+    // `exactOptionalPropertyTypes` is on, so never assign an explicit undefined.
+    if (result.reason !== null) job.filterReason = result.reason;
+
+    byFamily[result.family] = (byFamily[result.family] ?? 0) + 1;
+    if (result.score >= threshold) relevant += 1;
+    else filtered += 1;
+    if (result.score === 0) blocklisted += 1;
+  }
+
+  return { scored: jobs.length, relevant, filtered, blocklisted, byFamily, minRelevance: threshold };
 }
 
 async function runTarget(
@@ -135,6 +225,11 @@ async function runTarget(
   // 4. Final tidy of topMetadata (deadline formatting).
   const jobs = standardizeJobs(enriched.jobs);
 
+  // 5. Relevance scoring. Runs on the finalized rows so it sees the department and
+  //    employment type the backfill recovered. Re-scored after LLM enrichment once
+  //    the model's seniority / YOE reading is available.
+  const relevance = applyRelevance(jobs);
+
   targetLogger.info(
     {
       scraped: scraped.jobs.length,
@@ -144,6 +239,11 @@ async function runTarget(
       adapterErrors: scraped.errors.length,
       backfillFilled: backfilled.stats.filled,
       backfillStillMissing: backfilled.stats.stillMissing,
+      relevance: {
+        relevant: relevance.relevant,
+        filtered: relevance.filtered,
+        blocklisted: relevance.blocklisted,
+      },
     },
     'pipeline completed',
   );
@@ -170,6 +270,7 @@ async function runTarget(
     enrichFailed: 0,
     enrichSkipped: 0,
     pushed: 0,
+    relevance,
   };
 
   if (!options.store) {
@@ -245,6 +346,22 @@ async function runTarget(
       result.enrichFailed = stats.failed;
       result.enrichSkipped =
         stats.skippedKnown + stats.skippedNoDescription + stats.skippedOverCap;
+
+      // Re-score using the model's seniority / years-of-experience, which beat the
+      // deterministic title heuristics because the model actually read the JD.
+      if (produced.size > 0) {
+        const refined = applyRelevance(jobs, produced);
+        result.relevance = refined;
+        targetLogger.info(
+          {
+            relevant: refined.relevant,
+            filtered: refined.filtered,
+            blocklisted: refined.blocklisted,
+            byFamily: refined.byFamily,
+          },
+          'relevance re-scored with LLM signals',
+        );
+      }
     }
   }
 
@@ -352,6 +469,8 @@ async function main(): Promise<void> {
     enriched: results.reduce((sum, r) => sum + r.enriched, 0),
     enrichFailed: results.reduce((sum, r) => sum + r.enrichFailed, 0),
     pushed: results.reduce((sum, r) => sum + r.pushed, 0),
+    relevanceFiltered: results.reduce((sum, r) => sum + r.relevance.filtered, 0),
+    relevanceBlocklisted: results.reduce((sum, r) => sum + r.relevance.blocklisted, 0),
   };
   logger.info(summary, 'run complete');
   if (failures.length > 0) logger.warn({ failures }, 'targets that failed');

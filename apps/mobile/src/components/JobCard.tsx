@@ -44,15 +44,26 @@ export const JobCard = React.memo(function JobCard({
   const seniority = formatSeniority(job.seniority);
   const posted = formatRelative(job.firstSeenAt);
 
+  // An expired posting is still shown, but never as if it were actionable: it is
+  // dimmed and the deadline pill is replaced by a plain "Closed" label. This is the
+  // difference between "this job closed" and "this job was never scraped", which
+  // the app could not express before.
+  const dimmed = job.isExpired || job.relevanceBand === 'low' || job.relevanceBand === 'filtered';
+
   return (
     <Pressable
       onPress={() => onPress(job)}
       accessibilityRole="button"
-      accessibilityLabel={`${job.title} at ${job.companyName}`}
-      style={({ pressed }) => [s.card, cardShadow(theme), pressed ? s.pressed : null]}
+      accessibilityLabel={`${job.title} at ${job.companyName}${job.isExpired ? ', closed' : ''}`}
+      style={({ pressed }) => [
+        s.card,
+        cardShadow(theme),
+        dimmed ? s.cardDimmed : null,
+        pressed ? s.pressed : null,
+      ]}
     >
       <View style={s.headerRow}>
-        {job.isNew ? <NewBadge /> : null}
+        {job.isNew && !job.isExpired ? <NewBadge /> : null}
         <Text style={s.title} numberOfLines={2}>
           {shortTitle(job.title, 96)}
         </Text>
@@ -80,6 +91,8 @@ export const JobCard = React.memo(function JobCard({
       ) : null}
 
       <View style={s.pillRow}>
+        {job.applied ? <Pill label="Applied" tone="success" icon="checkmark-circle" /> : null}
+        {job.isExpired ? <Pill label="Closed" icon="lock-closed-outline" /> : null}
         {employment ? <Pill label={employment} tone="primary" /> : null}
         {seniority ? <Pill label={seniority} /> : null}
         {yoe ? <Pill label={yoe} icon="briefcase-outline" /> : null}
@@ -87,7 +100,9 @@ export const JobCard = React.memo(function JobCard({
       </View>
 
       <View style={s.footerRow}>
-        {deadline.label ? (
+        {job.isExpired ? (
+          <Pill label="No longer accepting" icon="close-circle-outline" />
+        ) : deadline.label ? (
           <Pill
             label={deadline.label}
             tone={deadlineTone}
@@ -120,6 +135,9 @@ const makeStyles = (theme: Theme) =>
       borderColor: theme.color.border,
       padding: theme.space(4),
       gap: theme.space(2),
+    },
+    cardDimmed: {
+      opacity: 0.6,
     },
     pressed: {
       opacity: 0.7,

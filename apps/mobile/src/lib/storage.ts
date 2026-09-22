@@ -17,6 +17,8 @@ const KEYS = {
   pushToken: 'applyez.pushToken',
   pushEnabled: 'applyez.pushEnabled',
   resumeSelection: 'applyez.resumeSelection',
+  minRelevance: 'applyez.minRelevance',
+  showFiltered: 'applyez.showFiltered',
 } as const;
 
 export type ResumeSlot = 'tech' | 'data' | 'general';
@@ -137,6 +139,34 @@ export async function getResumeSelection(): Promise<ResumeSelection> {
 
 export async function setResumeSelection(selection: ResumeSelection): Promise<void> {
   await setString(KEYS.resumeSelection, JSON.stringify(selection));
+}
+
+/**
+ * Relevance display threshold.
+ *
+ * The scraper computes a 0-100 score; this is the cut-off below which the list
+ * hides a job. It lives on the device rather than in the scraper so it can be tuned
+ * without re-scraping the whole backlog — the score is a measurement, the threshold
+ * is a preference.
+ */
+export async function getMinRelevance(fallback: number): Promise<number> {
+  const raw = await getString(KEYS.minRelevance);
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+export async function setMinRelevance(value: number): Promise<void> {
+  await setString(KEYS.minRelevance, String(value));
+}
+
+/** When true, jobs below the threshold are listed too (dimmed, not hidden). */
+export async function getShowFiltered(): Promise<boolean> {
+  return (await getString(KEYS.showFiltered)) === 'true';
+}
+
+export async function setShowFiltered(value: boolean): Promise<void> {
+  await setString(KEYS.showFiltered, value ? 'true' : 'false');
 }
 
 export async function clearCache(): Promise<void> {

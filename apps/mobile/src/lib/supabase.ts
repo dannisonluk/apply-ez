@@ -1,11 +1,11 @@
 import { config } from './config';
-import type { JobRow } from '../types';
+import type { AppliedJob, JobRow } from '../types';
 
 /**
  * Minimal PostgREST client.
  *
- * Deliberately not `@supabase/supabase-js`: the app makes four kinds of request
- * (list jobs, read one job, register a push token, disable a push token), and
+ * Deliberately not `@supabase/supabase-js`: the app makes a handful of requests
+ * (list jobs, read one job, register/disable a push token, call three RPCs), and
  * hand-writing those against the REST API keeps the bundle small and the failure
  * modes obvious. No auth session, no realtime, no storage client needed.
  */
@@ -19,6 +19,20 @@ export class RestError extends Error {
     this.name = 'RestError';
     this.status = status;
     this.body = body;
+  }
+
+  /**
+   * True when the server rejected a code.
+   *
+   * The RPCs raise with SQLSTATE 28000 and a message of INVALID_UNLOCK_CODE or
+   * INVALID_APPLICATION_CODE, which PostgREST surfaces as a 403/400 with the
+   * message in the body. Matched on the message rather than the status alone so a
+   * genuine permissions problem is not silently reported as "wrong code".
+   */
+  get isCodeRejection(): boolean {
+    return (
+      this.body.includes('INVALID_UNLOCK_CODE') || this.body.includes('INVALID_APPLICATION_CODE')
+    );
   }
 }
 
@@ -62,6 +76,11 @@ async function rest<T>(path: string, options: RequestOptions = {}): Promise<T> {
   }
 }
 
+/** Call a Postgres function exposed through PostgREST. */
+async function rpc<T>(fn: string, body: Record<string, unknown>): Promise<T> {
+  return rest<T>(`/rpc/${fn}`, { method: 'POST', body });
+}
+
 /**
  * Every column the app reads. `companies(...)` is PostgREST resource embedding —
  * it resolves through the `jobs.company_id` foreign key, so the list screen does
@@ -91,6 +110,9 @@ const JOB_SELECT = [
   'first_seen_at',
   'last_seen_at',
   'status',
+  'relevance_score',
+  'role_family',
+  'filter_reason',
   'summary',
   'summary_lang',
   'extracted',
@@ -100,14 +122,21 @@ const JOB_SELECT = [
   'companies(name,slug,domain)',
 ].join(',');
 
-export async function fetchJobs(limit = 200): Promise<JobRow[]> {
-  // The RLS policy already restricts anon reads to status = ACTIVE, but stating it
-  // here keeps the intent visible and avoids relying on a policy staying correct.
+/**
+ * Fetch the job list.
+ *
+ * EXPIRED rows are included on purpose — the app groups them into a separate tab
+ * rather than making them vanish, which is the only way to tell "this posting
+ * closed" apart from "this posting was never scraped".
+ *
+ * Ordering is `status` first so ACTIVE sorts before EXPIRED, which guarantees a
+ * large expired backlog can never push live postings past the row limit.
+ */
+export async function fetchJobs(limit = 400): Promise<JobRow[]> {
   const rows = await rest<JobRow[]>('/jobs', {
     query:
       `select=${JOB_SELECT}` +
-      `&status=eq.ACTIVE` +
-      `&order=first_seen_at.desc` +
+      `&order=status.asc,first_seen_at.desc` +
       `&limit=${limit}`,
   });
   return rows ?? [];
@@ -119,6 +148,60 @@ export async function fetchJob(id: string): Promise<JobRow | null> {
   });
   return rows?.[0] ?? null;
 }
+
+// ─── application codes + history ─────────────────────────────────────────────
+
+/**
+ * Check a candidate unlock code.
+ *
+ * The code never reaches the device: it is stored as a bcrypt hash in
+ * `app_settings` (RLS on, no policy) and only ever compared inside a
+ * SECURITY DEFINER function. So this returns a boolean rather than raising, and a
+ * wrong code is an ordinary `false`.
+ */
+export async function verifyUnlockCode(code: string): Promise<boolean> {
+  const result = await rpc<boolean>('app_unlock', { p_code: code });
+  return result === true;
+}
+
+/**
+ * Application history, newest first.
+ *
+ * Gated by the unlock code because `applications` has no anon read policy — the
+ * only way to read it is through this function.
+ */
+export async function fetchApplications(code: string): Promise<AppliedJob[]> {
+  const rows = await rpc<AppliedJob[]>('list_applications', { p_code: code });
+  return rows ?? [];
+}
+
+export interface RecordApplicationInput {
+  /** The BEFORE_APPLICATION code. Verified server-side. */
+  code: string;
+  jobId: string;
+  resumeKey?: string | undefined;
+  evidenceUrl?: string | undefined;
+  notes?: string | undefined;
+}
+
+/**
+ * Record one application.
+ *
+ * `job_id` is unique on `applications`, so re-recording the same job updates the
+ * existing row instead of creating a duplicate — applying twice to one posting is
+ * a data error, not a second event.
+ */
+export async function recordApplication(input: RecordApplicationInput): Promise<void> {
+  await rpc('record_application', {
+    p_code: input.code,
+    p_job_id: input.jobId,
+    p_resume_key: input.resumeKey ?? null,
+    p_evidence_url: input.evidenceUrl ?? null,
+    p_notes: input.notes ?? null,
+  });
+}
+
+// ─── push ────────────────────────────────────────────────────────────────────
 
 export interface PushTokenInput {
   token: string;
@@ -163,7 +246,8 @@ export async function disablePushToken(token: string): Promise<void> {
   });
 }
 
-/** Resume slots stored on the single-user `profile` row. */
+/** Resume slots stored on the single-user `profile` row. Service-role only, so
+ *  this currently returns null for the app — kept for when the app gets a way in. */
 export async function fetchProfile(): Promise<{ resumes: Record<string, string> } | null> {
   const rows = await rest<Array<{ resumes: Record<string, string> | null }>>('/profile', {
     query: 'select=resumes&limit=1',

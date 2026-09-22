@@ -79,6 +79,33 @@ function normalizeBaseUrl(url: string): string {
   return url.replace(/\/+$/, '');
 }
 
+/**
+ * Turn PostgREST's schema-cache errors into something actionable.
+ *
+ * The common failure in practice is running the scraper against a database that
+ * is behind the code — a migration was written but never applied. PostgREST
+ * answers with `PGRST204` / `42703` and a message that names the column, which
+ * reads like a typo in the client rather than a missing migration. Saying so
+ * explicitly saves a debugging detour.
+ *
+ * Exported so `scripts/check-store.ts` can pin the classification: a false
+ * positive here would send someone chasing a migration that is already applied.
+ */
+export function describeSchemaError(status: number, raw: string): string {
+  // Only 400/404 can be a missing object; a 401/429/5xx has other causes.
+  if (status !== 400 && status !== 404) return '';
+  // PGRST202-205 = PostgREST's "not in the schema cache" family (function, table,
+  // column). 42P01 / 42703 / 42883 = Postgres's own undefined_table /
+  // undefined_column / undefined_function.
+  if (!/PGRST20[2-5]|42P01|42703|42883/.test(raw)) return '';
+  return (
+    '\n  → This looks like a schema/code mismatch, not a bug in the request.' +
+    '\n    The database is probably missing a migration. Apply the files in' +
+    '\n    supabase/migrations/ in order in the Supabase SQL editor, then retry.' +
+    '\n    (`pnpm check:sql` validates them without touching the database.)'
+  );
+}
+
 export class JobStore {
   private readonly restUrl: string;
   private readonly headers: Record<string, string>;
@@ -113,7 +140,8 @@ export class JobStore {
     const raw = await response.body.text();
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw new Error(
-        `Supabase ${method} ${path} failed with ${response.statusCode}: ${raw.slice(0, 500)}`,
+        `Supabase ${method} ${path} failed with ${response.statusCode}: ${raw.slice(0, 500)}` +
+          describeSchemaError(response.statusCode, raw),
       );
     }
     if (!raw) return undefined as T;
@@ -226,6 +254,12 @@ export class JobStore {
         tags: job.tags ?? [],
         classification: job.classification ?? {},
         top_metadata: job.topMetadata ?? {},
+        // Relevance scoring. Written on every upsert so a re-scrape after a rules
+        // change updates existing rows too. 50 is the neutral default in the
+        // migration, used when the scorer never ran (e.g. `--no-relevance`).
+        relevance_score: job.relevanceScore ?? 50,
+        role_family: job.roleFamily ?? null,
+        filter_reason: job.filterReason ?? null,
         published_at: job.publishedAt,
         last_seen_at: new Date().toISOString(),
         // Reappearing jobs come back to ACTIVE; EXPIRED is only set by reconcile.

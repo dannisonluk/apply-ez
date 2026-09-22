@@ -1,10 +1,19 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useNavigation } from 'expo-router';
-import React, { useEffect, useMemo, useState } from 'react';
-import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  ActivityIndicator,
+  Linking,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Card, DetailRow, Divider, EmptyState, NewBadge, Notice, Pill, PrimaryButton, Section, Spinner } from '../../src/components/ui';
-import { fetchJob } from '../../src/lib/supabase';
+import { RestError, fetchJob } from '../../src/lib/supabase';
 import {
   deadlineInfo,
   formatDate,
@@ -16,8 +25,15 @@ import {
   formatYoe,
 } from '../../src/lib/format';
 import { useJobs } from '../../src/state/jobs';
+import { useSession } from '../../src/state/session';
 import { palettes, useTheme, type Theme } from '../../src/theme';
 import { toJobView, type JobView } from '../../src/types';
+
+const RESUME_SLOTS = [
+  { key: 'tech', label: 'Tech' },
+  { key: 'data', label: 'Data / BA' },
+  { key: 'general', label: 'General' },
+] as const;
 
 export default function JobDetailScreen(): React.JSX.Element {
   const theme = useTheme();
@@ -28,6 +44,7 @@ export default function JobDetailScreen(): React.JSX.Element {
   const id = typeof params.id === 'string' ? params.id : '';
 
   const { jobs } = useJobs();
+  const { unlocked, applications, record, unlock } = useSession();
 
   // Prefer the already-loaded row so the screen paints instantly, including when
   // it was reached by tapping a card. A notification tap or a cold deep link has
@@ -91,6 +108,8 @@ export default function JobDetailScreen(): React.JSX.Element {
   const arrangement = formatWorkArrangement(job.workArrangement);
   const seniority = formatSeniority(job.seniority);
 
+  const application = applications.find((item) => item.job_id === job.id) ?? null;
+
   const open = (url: string) => {
     void Linking.openURL(url).catch(() => setError(`Could not open ${url}`));
   };
@@ -101,7 +120,11 @@ export default function JobDetailScreen(): React.JSX.Element {
       contentContainerStyle={[s.content, { paddingBottom: insets.bottom + theme.space(10) }]}
     >
       <View style={s.headerBlock}>
-        {job.isNew ? <NewBadge /> : null}
+        <View style={s.badgeRow}>
+          {job.isNew && !job.isExpired ? <NewBadge /> : null}
+          {job.applied ? <Pill label="Applied" tone="success" icon="checkmark-circle" /> : null}
+          {job.isExpired ? <Pill label="Closed" icon="lock-closed-outline" /> : null}
+        </View>
         <Text style={s.title}>{job.title}</Text>
         <View style={s.companyRow}>
           <Ionicons name="business-outline" size={14} color={theme.color.textMuted} />
@@ -116,8 +139,14 @@ export default function JobDetailScreen(): React.JSX.Element {
         </View>
       </View>
 
-      {error ? (
-        <Notice tone="danger" title="Something went wrong" message={error} />
+      {error ? <Notice tone="danger" title="Something went wrong" message={error} /> : null}
+
+      {job.isExpired ? (
+        <Notice
+          tone="warning"
+          title="This posting has closed"
+          message="The scraper no longer finds it on the company site. The link may still work, but do not expect a response."
+        />
       ) : null}
 
       {deadline.label ? (
@@ -198,6 +227,47 @@ export default function JobDetailScreen(): React.JSX.Element {
         </Card>
       </Section>
 
+      {/* Explains why this job is where it is. Without it, a low-match job that the
+          user has explicitly revealed would look identical to a good match. */}
+      <Section title="Match">
+        <Card>
+          <View style={s.matchRow}>
+            <View
+              style={[
+                s.matchScore,
+                {
+                  backgroundColor:
+                    job.relevanceBand === 'high'
+                      ? theme.color.successSoft
+                      : job.relevanceBand === 'medium'
+                        ? theme.color.primarySoft
+                        : theme.color.surfaceAlt,
+                },
+              ]}
+            >
+              <Text style={s.matchScoreValue}>{job.relevanceScore}</Text>
+              <Text style={s.matchScoreLabel}>/ 100</Text>
+            </View>
+            <View style={s.matchBody}>
+              <Text style={s.matchTitle}>
+                {job.relevanceBand === 'high'
+                  ? 'Strong match'
+                  : job.relevanceBand === 'medium'
+                    ? 'Possible match'
+                    : job.relevanceBand === 'low'
+                      ? 'Low match'
+                      : 'Filtered out'}
+              </Text>
+              <Text style={s.matchHint}>
+                {job.filterReason
+                  ? `Scored by ${job.filterReason.replace(/,/g, ', ')}`
+                  : 'No relevance signals found in the title.'}
+              </Text>
+            </View>
+          </View>
+        </Card>
+      </Section>
+
       {job.skills.length > 0 ? (
         <Section title={`Skills (${job.skills.length})`}>
           <Card>
@@ -235,26 +305,234 @@ export default function JobDetailScreen(): React.JSX.Element {
         </Section>
       ) : null}
 
-      <Section title="Actions">
-        <View style={s.actionColumn}>
+      <Section title="Apply">
+        <Card>
+          <View style={s.stepRow}>
+            <View style={s.stepNumber}>
+              <Text style={s.stepNumberText}>1</Text>
+            </View>
+            <View style={s.stepBody}>
+              <Text style={s.stepTitle}>Open the application form</Text>
+              <Text style={s.stepHint}>
+                This opens {job.companyName}'s own site. You fill it in there.
+              </Text>
+            </View>
+          </View>
+          <View style={s.spacer} />
           <PrimaryButton
             label="Apply on the company site"
             icon="open-outline"
             onPress={() => open(job.applyUrl ?? job.url)}
           />
           {job.applyUrl ? (
-            <Pressable onPress={() => open(job.url)} style={s.secondaryButton} accessibilityRole="button">
-              <Ionicons name="document-text-outline" size={16} color={theme.color.textMuted} />
-              <Text style={s.secondaryButtonText}>View the original posting</Text>
-            </Pressable>
+            <>
+              <View style={s.spacerSmall} />
+              <Pressable onPress={() => open(job.url)} style={s.secondaryButton} accessibilityRole="button">
+                <Ionicons name="document-text-outline" size={16} color={theme.color.textMuted} />
+                <Text style={s.secondaryButtonText}>View the original posting</Text>
+              </Pressable>
+            </>
           ) : null}
-        </View>
-        <Text style={s.actionNote}>
-          Assisted apply — autofilling the company's form and attaching a saved resume — is not
-          built yet. Every application will require a final manual confirmation.
-        </Text>
+
+          <Divider />
+
+          <View style={s.stepRow}>
+            <View style={s.stepNumber}>
+              <Text style={s.stepNumberText}>2</Text>
+            </View>
+            <View style={s.stepBody}>
+              <Text style={s.stepTitle}>Record it once you have submitted</Text>
+              <Text style={s.stepHint}>
+                Confirming asks for the application code, so a stray tap can never file anything.
+              </Text>
+            </View>
+          </View>
+          <View style={s.spacer} />
+
+          {application ? (
+            <AppliedRecord
+              appliedAt={application.applied_at}
+              resumeKey={application.resume_key}
+            />
+          ) : null}
+
+          <ApplyRecorder
+            unlocked={unlocked}
+            alreadyApplied={application !== null}
+            onUnlock={unlock}
+            onSubmit={async (resumeKey, beforeApplyCode) => {
+              await record({ jobId: job.id, beforeApplyCode, resumeKey });
+            }}
+          />
+        </Card>
       </Section>
+
+      <Text style={s.actionNote}>
+        Nothing is submitted automatically. The app records an application only after you say you
+        sent it, and every application stops at this final manual step.
+      </Text>
     </ScrollView>
+  );
+}
+
+/** The confirmation panel. Two gates: unlock the area, then the per-submit code. */
+function ApplyRecorder({
+  unlocked,
+  alreadyApplied,
+  onUnlock,
+  onSubmit,
+}: {
+  unlocked: boolean;
+  alreadyApplied: boolean;
+  onUnlock: (code: string) => Promise<boolean>;
+  onSubmit: (resumeKey: string, beforeApplyCode: string) => Promise<void>;
+}): React.JSX.Element {
+  const theme = useTheme();
+  const s = styles[theme.scheme];
+
+  const [unlockInput, setUnlockInput] = useState('');
+  const [resumeKey, setResumeKey] = useState<string>('tech');
+  const [code, setCode] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const doUnlock = useCallback(async (): Promise<void> => {
+    if (!unlockInput.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const ok = await onUnlock(unlockInput);
+      if (ok) setUnlockInput('');
+      else setError('That unlock code was not accepted.');
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setBusy(false);
+    }
+  }, [onUnlock, unlockInput]);
+
+  const doSubmit = useCallback(async (): Promise<void> => {
+    if (!code.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await onSubmit(resumeKey, code);
+      setCode('');
+    } catch (caught) {
+      if (caught instanceof RestError && caught.isCodeRejection) {
+        setError('That application code was not accepted.');
+      } else {
+        setError(caught instanceof Error ? caught.message : String(caught));
+      }
+    } finally {
+      setBusy(false);
+    }
+  }, [code, onSubmit, resumeKey]);
+
+  if (!unlocked) {
+    return (
+      <>
+        <TextInput
+          value={unlockInput}
+          onChangeText={setUnlockInput}
+          placeholder="Unlock code"
+          placeholderTextColor={theme.color.textFaint}
+          style={s.input}
+          autoCapitalize="none"
+          autoCorrect={false}
+          secureTextEntry
+          returnKeyType="go"
+          onSubmitEditing={() => void doUnlock()}
+        />
+        {error ? <Text style={s.errorText}>{error}</Text> : null}
+        <View style={s.spacerSmall} />
+        <PrimaryButton
+          label={busy ? 'Checking…' : 'Unlock'}
+          icon="lock-open-outline"
+          onPress={() => void doUnlock()}
+          disabled={busy || unlockInput.trim().length === 0}
+        />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <Text style={s.fieldLabel}>Resume used</Text>
+      <View style={s.resumeRow}>
+        {RESUME_SLOTS.map((slot) => {
+          const active = resumeKey === slot.key;
+          return (
+            <Pressable
+              key={slot.key}
+              onPress={() => setResumeKey(slot.key)}
+              accessibilityRole="button"
+              accessibilityState={{ selected: active }}
+              style={[s.resumeChip, active ? s.resumeChipActive : null]}
+            >
+              <Text style={[s.resumeChipText, active ? s.resumeChipTextActive : null]}>
+                {slot.label}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+
+      <View style={s.spacerSmall} />
+      <Text style={s.fieldLabel}>Application code</Text>
+      <TextInput
+        value={code}
+        onChangeText={setCode}
+        placeholder="Required to confirm"
+        placeholderTextColor={theme.color.textFaint}
+        style={s.input}
+        autoCapitalize="none"
+        autoCorrect={false}
+        secureTextEntry
+        returnKeyType="go"
+        onSubmitEditing={() => void doSubmit()}
+      />
+
+      {error ? <Text style={s.errorText}>{error}</Text> : null}
+
+      <View style={s.spacerSmall} />
+      <PrimaryButton
+        label={
+          busy
+            ? 'Recording…'
+            : alreadyApplied
+              ? 'Update the recorded application'
+              : 'I have submitted — record it'
+        }
+        icon="checkmark-circle-outline"
+        onPress={() => void doSubmit()}
+        disabled={busy || code.trim().length === 0}
+      />
+    </>
+  );
+}
+
+function AppliedRecord({
+  appliedAt,
+  resumeKey,
+}: {
+  appliedAt: string;
+  resumeKey: string | null;
+}): React.JSX.Element {
+  const theme = useTheme();
+  const s = styles[theme.scheme];
+  const label = RESUME_SLOTS.find((slot) => slot.key === resumeKey)?.label ?? resumeKey;
+
+  return (
+    <View style={s.appliedBox}>
+      <Ionicons name="checkmark-circle" size={18} color={theme.color.success} />
+      <View style={s.appliedBody}>
+        <Text style={s.appliedTitle}>Recorded {formatRelative(appliedAt)}</Text>
+        <Text style={s.appliedHint}>
+          {label ? `Resume: ${label}` : 'No resume recorded'}
+        </Text>
+      </View>
+    </View>
   );
 }
 
@@ -272,6 +550,11 @@ const makeStyles = (theme: Theme) =>
     headerBlock: {
       gap: theme.space(2),
       paddingBottom: theme.space(1),
+    },
+    badgeRow: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: theme.space(1.5),
     },
     title: {
       fontSize: theme.font.title - 3,
@@ -345,6 +628,41 @@ const makeStyles = (theme: Theme) =>
       color: theme.color.text,
       lineHeight: 19,
     },
+    matchRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: theme.space(3),
+    },
+    matchScore: {
+      width: 62,
+      height: 62,
+      borderRadius: theme.radius.md,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    matchScoreValue: {
+      fontSize: theme.font.heading,
+      fontWeight: '800',
+      color: theme.color.text,
+    },
+    matchScoreLabel: {
+      fontSize: 10,
+      color: theme.color.textFaint,
+    },
+    matchBody: {
+      flex: 1,
+      gap: 2,
+    },
+    matchTitle: {
+      fontSize: theme.font.body,
+      fontWeight: '700',
+      color: theme.color.text,
+    },
+    matchHint: {
+      fontSize: theme.font.caption,
+      color: theme.color.textMuted,
+      lineHeight: 17,
+    },
     pillWrap: {
       flexDirection: 'row',
       flexWrap: 'wrap',
@@ -368,8 +686,114 @@ const makeStyles = (theme: Theme) =>
       color: theme.color.text,
       lineHeight: 20,
     },
-    actionColumn: {
+    stepRow: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: theme.space(3),
+    },
+    stepNumber: {
+      width: 24,
+      height: 24,
+      borderRadius: 12,
+      backgroundColor: theme.color.primarySoft,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    stepNumberText: {
+      fontSize: theme.font.caption,
+      fontWeight: '800',
+      color: theme.color.primary,
+    },
+    stepBody: {
+      flex: 1,
+      gap: 2,
+    },
+    stepTitle: {
+      fontSize: theme.font.body,
+      fontWeight: '700',
+      color: theme.color.text,
+    },
+    stepHint: {
+      fontSize: theme.font.caption,
+      color: theme.color.textMuted,
+      lineHeight: 17,
+    },
+    fieldLabel: {
+      fontSize: theme.font.caption,
+      fontWeight: '700',
+      color: theme.color.textMuted,
+      marginBottom: theme.space(1.5),
+    },
+    input: {
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.color.border,
+      borderRadius: theme.radius.md,
+      paddingHorizontal: theme.space(3),
+      paddingVertical: theme.space(2.5),
+      fontSize: theme.font.body,
+      color: theme.color.text,
+      backgroundColor: theme.color.surfaceAlt,
+      textAlign: 'center',
+      letterSpacing: 2,
+    },
+    errorText: {
+      marginTop: theme.space(2),
+      fontSize: theme.font.caption,
+      color: theme.color.danger,
+      textAlign: 'center',
+    },
+    resumeRow: {
+      flexDirection: 'row',
+      gap: theme.space(2),
+    },
+    resumeChip: {
+      flex: 1,
+      alignItems: 'center',
+      paddingVertical: theme.space(2.5),
+      borderRadius: theme.radius.md,
+      backgroundColor: theme.color.surfaceAlt,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: 'transparent',
+    },
+    resumeChipActive: {
+      backgroundColor: theme.color.primarySoft,
+      borderColor: theme.color.primary,
+    },
+    resumeChipText: {
+      fontSize: theme.font.label,
+      fontWeight: '700',
+      color: theme.color.textMuted,
+    },
+    resumeChipTextActive: {
+      color: theme.color.primary,
+    },
+    appliedBox: {
+      flexDirection: 'row',
+      alignItems: 'center',
       gap: theme.space(2.5),
+      padding: theme.space(3),
+      borderRadius: theme.radius.md,
+      backgroundColor: theme.color.successSoft,
+      marginBottom: theme.space(3),
+    },
+    appliedBody: {
+      flex: 1,
+      gap: 1,
+    },
+    appliedTitle: {
+      fontSize: theme.font.label,
+      fontWeight: '700',
+      color: theme.color.success,
+    },
+    appliedHint: {
+      fontSize: theme.font.caption,
+      color: theme.color.textMuted,
+    },
+    spacer: {
+      marginTop: theme.space(3),
+    },
+    spacerSmall: {
+      marginTop: theme.space(2.5),
     },
     secondaryButton: {
       flexDirection: 'row',

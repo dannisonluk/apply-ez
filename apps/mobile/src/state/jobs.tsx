@@ -13,13 +13,18 @@ import { fetchJobs } from '../lib/supabase';
 import {
   getCachedJobs,
   getLastOpenedAt,
+  getMinRelevance,
+  getShowFiltered,
   setCachedJobs,
   setLastOpenedAt,
+  setMinRelevance as persistMinRelevance,
+  setShowFiltered as persistShowFiltered,
 } from '../lib/storage';
-import { toJobView, type JobRow, type JobView } from '../types';
+import { DEFAULT_MIN_RELEVANCE, toJobView, type JobRow, type JobView } from '../types';
+import { useSession } from './session';
 
 /**
- * Job list state, shared between the list screen and the tab badge.
+ * Job list state, shared between the list screen, the tab badges and Settings.
  *
  * The "new job" rule, which is the whole point of the app:
  *
@@ -37,7 +42,14 @@ import { toJobView, type JobRow, type JobView } from '../types';
  */
 
 export interface JobsState {
+  /** Every job, active and expired, already mapped to the view model. */
   jobs: JobView[];
+  /** Active jobs at or above the relevance threshold — the default list. */
+  visible: JobView[];
+  /** Active jobs below the threshold. Hidden unless `showFiltered`. */
+  lowRelevance: JobView[];
+  /** Jobs the reconcile marked EXPIRED. */
+  expired: JobView[];
   /** Jobs that arrived since the previous session. */
   newCount: number;
   /** True only for the very first load, when there is nothing cached to show. */
@@ -48,6 +60,13 @@ export interface JobsState {
   /** True when the visible list came from disk rather than the network. */
   fromCache: boolean;
   refresh: () => Promise<void>;
+
+  /** 0-100 cut-off below which a job is hidden. Persisted per device. */
+  minRelevance: number;
+  setMinRelevance: (value: number) => void;
+  /** When true, low-relevance jobs appear in the list too (dimmed). */
+  showFiltered: boolean;
+  setShowFiltered: (value: boolean) => void;
 }
 
 const JobsContext = createContext<JobsState | null>(null);
@@ -60,6 +79,12 @@ export function JobsProvider({ children }: { children: ReactNode }): React.JSX.E
   const [error, setError] = useState<string | null>(null);
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
   const [fromCache, setFromCache] = useState(false);
+  const [minRelevance, setMinRelevanceState] = useState<number>(DEFAULT_MIN_RELEVANCE);
+  const [showFiltered, setShowFilteredState] = useState(false);
+
+  // Applied ids come from the session so every card can show an "Applied" badge
+  // without the list screen needing to know about applications.
+  const { appliedJobIds } = useSession();
 
   const bootstrapped = useRef(false);
 
@@ -90,7 +115,15 @@ export function JobsProvider({ children }: { children: ReactNode }): React.JSX.E
       const previousOpen = await getLastOpenedAt();
       setNewSince(previousOpen);
 
-      // 2. Paint the cache immediately so the list is never blank on a cold start.
+      // 2. Restore display preferences alongside the cache.
+      const [storedThreshold, storedShowFiltered] = await Promise.all([
+        getMinRelevance(DEFAULT_MIN_RELEVANCE),
+        getShowFiltered(),
+      ]);
+      setMinRelevanceState(storedThreshold);
+      setShowFilteredState(storedShowFiltered);
+
+      // 3. Paint the cache immediately so the list is never blank on a cold start.
       const cached = await getCachedJobs();
       if (cached) {
         setRows(cached.rows);
@@ -99,11 +132,11 @@ export function JobsProvider({ children }: { children: ReactNode }): React.JSX.E
         setLoading(false);
       }
 
-      // 3. Mark this session as opened. The in-memory baseline above is what the
+      // 4. Mark this session as opened. The in-memory baseline above is what the
       //    NEW flags use, so this does not clear them.
       await setLastOpenedAt(Date.now());
 
-      // 4. Refresh from the network. Silent when the cache already painted.
+      // 5. Refresh from the network. Silent when the cache already painted.
       await load({ silent: cached !== null });
     })();
   }, [load]);
@@ -112,12 +145,71 @@ export function JobsProvider({ children }: { children: ReactNode }): React.JSX.E
     await load({ silent: false });
   }, [load]);
 
-  const jobs = useMemo(() => rows.map((row) => toJobView(row, newSince)), [rows, newSince]);
-  const newCount = useMemo(() => jobs.filter((job) => job.isNew).length, [jobs]);
+  const setMinRelevance = useCallback((value: number): void => {
+    setMinRelevanceState(value);
+    void persistMinRelevance(value);
+  }, []);
+
+  const setShowFiltered = useCallback((value: boolean): void => {
+    setShowFilteredState(value);
+    void persistShowFiltered(value);
+  }, []);
+
+  const jobs = useMemo(
+    () => rows.map((row) => toJobView(row, newSince, { appliedJobIds, minRelevance })),
+    [rows, newSince, appliedJobIds, minRelevance],
+  );
+
+  // Expired jobs are separated rather than mixed in: an expired posting is not
+  // actionable, so it must not compete with live ones for attention. They are kept
+  // visible in their own tab because "this closed" is information the user needs —
+  // silently dropping them makes a job look like it was never scraped.
+  const { visible, lowRelevance, expired } = useMemo(() => {
+    const active = jobs.filter((job) => !job.isExpired);
+    return {
+      visible: active.filter((job) => job.relevanceScore >= minRelevance),
+      lowRelevance: active.filter((job) => job.relevanceScore < minRelevance),
+      expired: jobs.filter((job) => job.isExpired),
+    };
+  }, [jobs, minRelevance]);
+
+  const newCount = useMemo(() => visible.filter((job) => job.isNew).length, [visible]);
 
   const value = useMemo<JobsState>(
-    () => ({ jobs, newCount, loading, refreshing, error, lastSyncedAt, fromCache, refresh }),
-    [jobs, newCount, loading, refreshing, error, lastSyncedAt, fromCache, refresh],
+    () => ({
+      jobs,
+      visible,
+      lowRelevance,
+      expired,
+      newCount,
+      loading,
+      refreshing,
+      error,
+      lastSyncedAt,
+      fromCache,
+      refresh,
+      minRelevance,
+      setMinRelevance,
+      showFiltered,
+      setShowFiltered,
+    }),
+    [
+      jobs,
+      visible,
+      lowRelevance,
+      expired,
+      newCount,
+      loading,
+      refreshing,
+      error,
+      lastSyncedAt,
+      fromCache,
+      refresh,
+      minRelevance,
+      setMinRelevance,
+      showFiltered,
+      setShowFiltered,
+    ],
   );
 
   return <JobsContext.Provider value={value}>{children}</JobsContext.Provider>;

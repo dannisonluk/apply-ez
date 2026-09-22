@@ -5,6 +5,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { addNotificationResponseListener, configureNotificationChannel } from '../src/lib/push';
 import { JobsProvider } from '../src/state/jobs';
+import { SessionProvider } from '../src/state/session';
 import { useTheme } from '../src/theme';
 
 export default function RootLayout(): React.JSX.Element {
@@ -35,29 +36,33 @@ export default function RootLayout(): React.JSX.Element {
   return (
     <GestureHandlerRootView style={{ flex: 1, backgroundColor: theme.color.background }}>
       <SafeAreaProvider>
-        <JobsProvider>
-          <StatusBar style={theme.scheme === 'dark' ? 'light' : 'dark'} />
-          <Stack
-            screenOptions={{
-              headerShown: false,
-              contentStyle: { backgroundColor: theme.color.background },
-            }}
-          >
-            <Stack.Screen name="(tabs)" />
-            <Stack.Screen
-              name="job/[id]"
-              options={{
-                headerShown: true,
-                title: 'Job',
-                headerBackTitle: 'Back',
-                headerStyle: { backgroundColor: theme.color.background },
-                headerTintColor: theme.color.primary,
-                headerTitleStyle: { color: theme.color.text },
-                headerShadowVisible: false,
+        {/* Session wraps Jobs: the job list needs `appliedJobIds` so each card can
+            show an "Applied" badge, so it must be able to read the session. */}
+        <SessionProvider>
+          <JobsProvider>
+            <StatusBar style={theme.scheme === 'dark' ? 'light' : 'dark'} />
+            <Stack
+              screenOptions={{
+                headerShown: false,
+                contentStyle: { backgroundColor: theme.color.background },
               }}
-            />
-          </Stack>
-        </JobsProvider>
+            >
+              <Stack.Screen name="(tabs)" />
+              <Stack.Screen
+                name="job/[id]"
+                options={{
+                  headerShown: true,
+                  title: 'Job',
+                  headerBackTitle: 'Back',
+                  headerStyle: { backgroundColor: theme.color.background },
+                  headerTintColor: theme.color.primary,
+                  headerTitleStyle: { color: theme.color.text },
+                  headerShadowVisible: false,
+                }}
+              />
+            </Stack>
+          </JobsProvider>
+        </SessionProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );

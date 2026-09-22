@@ -10,12 +10,18 @@ for the full architecture, hosting comparison, and auto-apply feasibility analys
 
 - Scrapes 12 Hong Kong employer careers sites every 4 hours via GitHub Actions
 - Normalises, de-duplicates, backfills missing fields, and enriches each posting
+- Scores every job 0-100 for relevance by role family, so cabin crew and bar work
+  do not drown the list — scored, never dropped
 - Summarises every **new** posting with an LLM (deadline, YOE, skills, caveats)
 - Upserts into Supabase Postgres, tracking `first_seen_at` so the app can show
   exactly which jobs are new
 - Pushes a notification to registered devices when a run finds new jobs
-- Daily full crawl detects and expires removed postings
-- Expo app: new-job list with filters and search, job detail, settings
+- Daily full crawl detects and expires removed postings, which the app shows in a
+  separate **Closed** view rather than letting them vanish
+- Records applications behind two server-verified codes, so the history is
+  persistent and every submission needs an explicit confirmation
+- Expo app: new-job list with filters and search, applied-jobs tab, job detail,
+  settings
 
 ## Layout
 
@@ -39,8 +45,22 @@ of build fragility.
 
 ### 1. Database
 
-Create a Supabase project, then run `supabase/migrations/0001_init.sql` and
-`0002_push_tokens.sql` in the SQL editor.
+Create a Supabase project, then run the migrations in order in the SQL editor:
+
+```
+supabase/migrations/0001_init.sql                        tables, indexes, RLS
+supabase/migrations/0002_push_tokens.sql                 device push tokens
+supabase/migrations/0003_relevance_applications_codes.sql
+    relevance columns · EXPIRED made visible · app_settings ·
+    app_unlock / record_application / list_applications / set_app_codes
+```
+
+Then push the two application codes to the server (see
+[Application codes](#application-codes-and-applied-jobs)):
+
+```bash
+pnpm --filter @apply-ez/scraper-core sync:codes
+```
 
 ### 2. Local run
 
@@ -105,8 +125,11 @@ adapter.scrape()
   → prepareJobsForIngest()   normalise + validate + de-duplicate; drops deep-content fields
   → enrichJobsWithSummary()  deterministic classification/tags
   → standardizeJobs()
+  → applyRelevance()         role family + 0-100 score, on the finalised rows
   → enrichJobs()             LLM; reads the RAW jobs, since `description` is gone by now
+  → applyRelevance() again   re-scored with the model's seniority / YOE reading
   → store.upsertJobs()
+  → notifyNewJobs()
 ```
 
 `src/lib/llm/` holds the enrichment layer:
@@ -207,19 +230,91 @@ note that Windows/Node silently ignores IANA names it cannot map, so `TZ=UTC` an
 `TZ=EST5EDT` are used rather than `TZ=Asia/Hong_Kong`, which would just be the
 machine's own zone.
 
-## Field coverage
+## Relevance filter
+
+A company careers site does not only list jobs you could do. Cathay Pacific's board
+carries cabin crew, lounge ambassadors and cargo supervisors alongside its IT roles.
+`src/lib/relevance.ts` scores every job 0-100 so the app can put that noise away.
+
+Three decisions worth knowing:
+
+1. **A score, not a boolean.** The scraper measures; the app decides what to show.
+   The threshold is a Settings preference (`Loose` 20 / `Balanced` 35 / `Strict` 60),
+   so tuning it never requires re-scraping the backlog.
+2. **Nothing is ever dropped.** A job that scores 0 is still written, with
+   `filter_reason` attached (`blocklist:bartender`, `family:AVIATION_OPS`, …).
+   Silently deleting rows is how you lose the one posting you would have wanted, and
+   it makes a mis-tuned rule impossible to debug after the fact. The list says how
+   many it is hiding and offers to reveal them.
+3. **Matching runs on the title and department only — never the description.**
+   Adapter descriptions are frequently polluted with page-level text, so a
+   description match would score every job on a page identically.
+
+Family rules are ordered most-specific-first and the title outranks the department,
+so "Cargo Supervisor" inside "Digital & Information Technology" is still a cargo
+role, and "Licensed Aircraft Engineer" does not read as a software job because of
+the word "engineer". Parenthetical qualifiers are stripped first, or
+"Senior Solution Lead – Subsidiaries (Cathay Cargo Terminal)" would be classified as
+cargo work by its own employer's name.
+
+The blocklist is anchored on the title, and deliberately does **not** contain bare
+`server`, `host` or `officer` — those would kill "Server Engineer", "Hosting
+Platform Lead" and "Compliance Officer".
+
+## Application codes and applied jobs
+
+Two codes, both stored in Supabase as bcrypt hashes and verified inside
+`SECURITY DEFINER` functions:
+
+| Code | Gates | Asked |
+| --- | --- | --- |
+| `UNLOCK_APPLICATION_CODE` | opening the application area, reading the history | once per install |
+| `BEFORE_APPLICATION_CODE` | recording a single application | every submit |
+
+The second one is deliberate friction: it is the "are you sure" step that stops a
+stray tap from filing a real application. Neither code is ever shipped in the app
+bundle, so a stolen APK yields nothing, and `app_settings` has RLS on with no policy
+so a database dump reveals only hashes.
+
+Push the hashes once after applying migration 0003, and again whenever you rotate a
+code:
+
+```bash
+pnpm --filter @apply-ez/scraper-core sync:codes
+```
+
+The script verifies its own work by round-tripping through the same `app_unlock`
+function the app calls — a silently failed write would otherwise leave the gate
+permanently shut.
+
+`applications` has no anon read policy at all. The app reads it through
+`list_applications(code)` and writes through `record_application(code, …)`, both
+gated by the codes above. A public INSERT policy would have been simpler and worse:
+`applications.job_id` is unique, so anyone holding the anon key could have marked
+jobs as applied.
+
+## Expired vs active
+
+`status` is set to `EXPIRED` by the daily full-crawl reconcile using a two-strike
+policy. Before migration 0003 the anon policy only exposed `status = 'ACTIVE'`, so
+an expired job simply vanished — there was no way to tell "this posting closed" from
+"this was never scraped". The policy now exposes the whole table and the app splits
+the list into **Active** and **Closed**, dimming closed cards and replacing their
+deadline pill with "No longer accepting".
+
+
 
 Adapters differ a lot in what their listing pages expose. `src/lib/job-backfill.ts`
 runs between the adapter and the pipeline and recovers the common gaps from the
-title and detail-page text. Measured on real dry runs — two very different sources:
+title and detail-page text. Measured on real dry runs — three very different sources:
 
-| Field | Towngas (custom CMS) | AIA (Workday) |
-| --- | --- | --- |
-| `location` | 10/10 → 10/10 | 40/40 → 40/40 |
-| `experienceMin` | **0/10 → 10/10** | **0/40 → 26/40** |
-| `department` | **0/10 → 7/10** | **0/40 → 17/40** |
-| `applicationDeadline` | 10/10 → 10/10 | 0/40 → 0/40 |
-| `employmentType` | **0/10 → 1/10** | 40/40 → 40/40 |
+| Field | Towngas (custom CMS) | AIA (Workday) | Cathay Pacific (custom) |
+| --- | --- | --- | --- |
+| `location` | 10/10 → 10/10 | 40/40 → 40/40 | 45/45 → 45/45 |
+| `experienceMin` | **0/10 → 10/10** | **0/40 → 26/40** | **0/45 → 33/45** |
+| `department` | **0/10 → 7/10** | **0/40 → 17/40** | 45/45 → 45/45 |
+| `applicationDeadline` | 10/10 → 10/10 | 0/40 → 0/40 | **0/45 → 41/45** |
+| `employmentType` | **0/10 → 1/10** | 40/40 → 40/40 | 44/45 → 45/45 |
 
 Read as *adapter alone → after backfill*.
 
@@ -231,14 +326,57 @@ Read as *adapter alone → after backfill*.
   it. The AIA adapter sets it directly, which is why backfill has nothing to do there.
 - `location` is 0 filled on both because the adapters already provide it.
 
+### The Cathay adapter, as a worked example
+
+Cathay is the case that shows why "the field is populated" is not the same as "the
+field is right". A dry run originally reported `employmentType` filled on 45/45
+jobs — and every one of them said `INTERNSHIP`, including a "Senior Solution Lead".
+The cause was three separate bugs stacked:
+
+1. **The card selector was wrong.** Cathay renders each result as
+   `a.search-listing__item` wrapping a `.search-listing__item__title` div and a
+   `.search-listing__item__props` span list. The adapter read the *anchor's* text,
+   which is the whole card — so `title` came out as
+   `"Senior Solution Lead – Subsidiaries (Cathay Cargo Terminal) Digital &
+   Information Technology Hong Kong SAR (China) Permanent"`, and every prop was lost.
+   `closest('article, li, div')` walked straight past the anchor to the 2,155-character
+   list container, so `description` became the text of *every card on the page* — the
+   same blob on all 45 jobs.
+2. **The backfill then read that blob.** With "Trainee" present in the page-wide text,
+   the employment-type rule matched and stamped `Internship` on everything.
+3. **Deadlines were never reachable at all.** Cathay publishes the closing date only
+   on the detail page (`Application deadline: 29 Sep 2026`), not on the card, so
+   `applicationDeadline` was 0/45.
+
+The fix reads the card's own title node and props, and adds a detail stage
+(`fetchCathayJobDetail`) that fetches each posting over plain HTTP — the pages are
+server-rendered, so no browser is needed for ~45 requests. The detail stage also
+trims the ~750-character equal-opportunities boilerplate off the end, because it
+would otherwise occupy the entire tail of the enrichment prompt's head+tail
+truncation window, which is exactly where the Requirements section lives.
+
+Two things generalise from this:
+
+- **A filled field is not a correct field.** The old run reported 45/45 and looked
+  healthy. Only reading the actual values — `scripts/probe-cathay.ts` dumps them —
+  exposed that they were uniformly wrong. That probe is kept in the repo.
+- **`page.evaluate` under tsx must be passed a string, not a closure.** esbuild wraps
+  named inner functions in its `__name` helper, which does not exist in the browser
+  context, so a closure throws `ReferenceError: __name is not defined`.
+
+
 Run the regression checks:
 
 ```bash
-pnpm --filter @apply-ez/scraper-core check          # all four suites, 215 assertions
-pnpm --filter @apply-ez/scraper-core check:backfill # 40
-pnpm --filter @apply-ez/scraper-core check:hk-time  # 51
-pnpm --filter @apply-ez/scraper-core check:llm      # 91
-pnpm --filter @apply-ez/scraper-core check:push     # 33
+pnpm --filter @apply-ez/scraper-core check           # all six suites, 382 assertions
+pnpm --filter @apply-ez/scraper-core check:backfill  # 40
+pnpm --filter @apply-ez/scraper-core check:hk-time   # 51
+pnpm --filter @apply-ez/scraper-core check:relevance # 148
+pnpm --filter @apply-ez/scraper-core check:llm       # 91
+pnpm --filter @apply-ez/scraper-core check:push      # 33
+pnpm --filter @apply-ez/scraper-core check:store     # 19
+
+pnpm check:sql                                       # migrations, 46 assertions
 
 cd apps/mobile && npm run typecheck
 ```
@@ -247,11 +385,48 @@ cd apps/mobile && npm run typecheck
 so the tool-call path, the 429 retry policy, and the `DeviceNotRegistered`
 classification are all verified without spending API quota or touching a device.
 
+`check:store` pins the writer's error classification. PostgREST answers a missing
+column with `PGRST204` and a message naming the column, which reads like a typo in
+the client rather than a database that is behind the code, so the writer appends an
+explicit "you probably have an unapplied migration" hint. The test pins that hint in
+both directions — it must fire on `PGRST202`/`PGRST204`/`PGRST205`/`42703`, and must
+*not* fire on a `23505` unique violation, a `23514` CHECK violation, a `42501` RLS
+denial, or a 5xx. A false positive there would send you to re-apply a migration that
+is already live.
+
+`check:relevance` uses **real Cathay Pacific Hong Kong job titles** as fixtures,
+taken from the live board. That matters: the layer's whole job is how it behaves on
+the actual mix a careers site publishes, and hand-picked examples would quietly
+avoid the awkward cases. Two of the fixtures exist purely as traps — "Server
+Engineer" and "Compliance Officer" would both be caught by a naive
+`server`/`officer` blocklist.
+
+`check:sql` validates the migrations in two layers, because neither is sufficient
+alone. `pglast` wraps libpg_query — the actual PostgreSQL parser — so the DDL,
+policies and `GRANT`/`REVOKE` statements are checked against real grammar rather
+than a regex. But libpg_query treats a `$$ … $$` body as an opaque string, so the
+plpgsql bodies get their own structural checks: balanced dollar-quoting and balanced
+`BEGIN`/`END`. That second check is subtler than it looks — a bare `end` closes four
+different things (`END;`, `END IF;`, `END LOOP;`, `END CASE;`, plus CASE
+*expressions*), so a naive `begin` vs `end` count reports false failures on any
+function containing a `CASE`. The counter therefore subtracts the other roles, and
+the script **self-tests that counter** against twelve known-good and two
+deliberately-broken bodies first — otherwise a counter stuck at `(1, 1)` would
+declare every migration clean.
+
+It needs `pglast` (`pip install pglast`); it is the one check that is not part of
+`pnpm -r check` for that reason.
+
 ## Not built yet
 
 - Assisted-apply flow (WebView autofill + Cloudflare R2 resumes). Every application
-  will require a final manual confirmation — see `docs/RESEARCH.md` §5.
+  will require a final manual confirmation — see `docs/RESEARCH.md` §5. The two-code
+  gate and the application record are built; the autofill is not.
 - Resume upload. The three slots (tech / data / general) exist in Settings as
-  placeholders.
+  placeholders, and the apply panel already records which one was used.
 - No i18n. The UI is English; job postings and AI summaries follow the posting's own
   language.
+- Relevance uses the deterministic rules only. The LLM layer contributes seniority
+  and years-of-experience, which feed the score, but role-family classification stays
+  deterministic on purpose — one source of truth for the family, so the two layers
+  cannot disagree.

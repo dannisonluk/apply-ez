@@ -136,3 +136,93 @@ export function toBulletFriendlyText(raw: string | undefined): string | undefine
 
   return normalized;
 }
+
+// ─── listing-card parsing ─────────────────────────────────────────────────────
+
+/**
+ * Cathay renders each search result as:
+ *
+ *   <a class="search-listing__item" href="/en/careers/jobs/hong-kong/<slug>-<id>">
+ *     <div class="search-listing__item__title">TITLE</div>
+ *     <div class="search-listing__item__props">
+ *       <span class="search-listing__item__props__item">DEPARTMENT</span>
+ *       <span class="search-listing__item__props__item">LOCATION</span>
+ *       <span class="search-listing__item__props__item">EMPLOYMENT TYPE</span>
+ *     </div>
+ *   </a>
+ *
+ * The anchor wraps the entire card, so its `textContent` is
+ * "TITLE DEPARTMENT LOCATION EMPLOYMENT TYPE". Reading that as the title is what
+ * previously produced 87-to-157-character "titles" and lost every prop — which in
+ * turn made the employment-type backfill see the word "Trainee" on the wrong jobs
+ * and mark 45 of 45 postings as INTERNSHIP.
+ */
+
+/** Values Cathay actually puts in the third prop slot. */
+const EMPLOYMENT_TYPE_PROP =
+  /^(?:permanent|contract|contractor|temporary(?:\s*\([^)]*\))?|fixed[\s-]?term|internship|intern|part[\s-]?time|full[\s-]?time|regular|freelance|secondment)$/i;
+
+/**
+ * A prop is a location if it reads like one: "Hong Kong SAR (China)",
+ * "Denpasar, Indonesia", "Bangkok, Thailand". A department name never does.
+ */
+const LOCATION_PROP = /(?:,\s*[A-Za-z]|\bhong\s+kong\b|\bSAR\b|\bChina\b|\bSingapore\b|\bTaiwan\b)/i;
+
+export interface CathayCard {
+  title: string;
+  department: string | undefined;
+  location: string | undefined;
+  employmentType: string | undefined;
+}
+
+/**
+ * Best-effort title recovery from raw card text.
+ *
+ * Used only when the `__title` node is missing (site redesign). It works by
+ * peeling the card's own props off the end, which is exact when the props are
+ * known and falls back to shape-matching when they are not.
+ */
+export function titleFromCardText(anchorText: string, props: string[]): string {
+  let out = normalizeText(anchorText);
+  if (!out) return '';
+
+  // 1. Trailing employment type: "... Permanent", "... Temporary (≤1year)".
+  out = out.replace(
+    /\s+(?:Permanent|Contract|Contractor|Temporary(?:\s*\([^)]*\))?|Fixed[\s-]?term|Internship|Intern|Part[\s-]?time|Full[\s-]?time|Regular|Freelance|Secondment)\s*$/i,
+    '',
+  );
+
+  // 2. Trailing location: "Hong Kong SAR (China)" or the general "<City>, <Country>".
+  out = out.replace(/\s+(?:Hong Kong SAR \(China\)|[A-Z][\w'.\- ]*(?:,\s*[A-Z][\w'.\- ]+)+)\s*$/, '');
+
+  // 3. Trailing prop we were handed explicitly — this is what removes the
+  //    department, which no shape rule can recognise on its own.
+  for (const prop of props) {
+    if (prop.length >= 4 && out.endsWith(prop)) out = out.slice(0, -prop.length).trim();
+  }
+
+  return normalizeText(out);
+}
+
+/**
+ * Split a listing card into its four fields.
+ *
+ * `titleNode` is the dedicated title element's text when the selector matched;
+ * when it is empty everything falls back to peeling `anchorText`.
+ */
+export function parseCathayCard(titleNode: string, anchorText: string, props: string[]): CathayCard {
+  const cleaned = props.map((prop) => normalizeText(prop)).filter((prop) => prop.length > 0);
+
+  // The type and location slots are identifiable by shape, so they are pulled out
+  // by content rather than by index — that way a card with no department (only
+  // location + type) does not shift the department slot onto the location.
+  const employmentType = cleaned.find((prop) => EMPLOYMENT_TYPE_PROP.test(prop));
+  const withoutType = cleaned.filter((prop) => prop !== employmentType);
+  const location = withoutType.find((prop) => LOCATION_PROP.test(prop));
+  const department = withoutType.find((prop) => prop !== location);
+
+  const title = normalizeText(titleNode) || titleFromCardText(anchorText, cleaned);
+
+  return { title, department, location, employmentType };
+}
+

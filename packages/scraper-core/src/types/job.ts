@@ -151,6 +151,14 @@ export const jobIngestSchema = z.object({
   requiresVisa: z.boolean().optional(),
   experienceMin: z.number().int().min(0).max(60).optional(),
   classification: jobClassificationSchema.optional(),
+  /**
+   * Relevance scoring (see `lib/relevance.ts`). `relevanceScore` is 0-100 and is
+   * the only thing the app filters on — it is a score rather than a boolean so the
+   * display threshold can be changed in the app without re-scraping.
+   */
+  relevanceScore: z.number().int().min(0).max(100).optional(),
+  roleFamily: z.string().max(40).optional(),
+  filterReason: z.string().max(200).optional(),
   publishedAt: z.string().datetime(),
   topMetadata: jobTopMetadataSchema.optional(),
 });

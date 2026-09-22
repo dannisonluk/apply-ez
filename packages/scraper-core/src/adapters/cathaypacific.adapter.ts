@@ -6,7 +6,11 @@ import type { ScraperAdapter, ScrapeContext, ScrapeResult, RawJob } from './adap
 import type { CathayConfig, CathayTopMetadata } from './cathay/types.js';
 import {
   decodeHtmlEntities,
+  extractHtmlSection,
+  extractTagText,
   normalizeText,
+  parseCathayCard,
+  stripHtmlToText,
   toAbsoluteUrl,
 } from './cathay/text.js';
 import {
@@ -25,6 +29,12 @@ import {
 const DEFAULT_START_URL = 'https://careers.cathaypacific.com/en/careers/jobs?keyword=&sortby=date&page=1&locations=hong-kong';
 const DEFAULT_MAX_PAGES = 10;
 const DEFAULT_SITEMAP_MAX_JOBS = 300;
+/**
+ * Ceiling on detail-page fetches per run. The Hong Kong slice is ~45 postings, so
+ * this is headroom rather than a real limit — it exists so an unexpectedly large
+ * board cannot turn one run into thousands of requests.
+ */
+const DEFAULT_DETAIL_MAX_JOBS = 60;
 const require = createRequire(import.meta.url);
 
 let playwrightInstallPromise: Promise<boolean> | null = null;
@@ -281,12 +291,152 @@ async function fetchHtmlWithRetry(
 }
 
 /**
+ * Section headings that mark the start of the real job description. Used only as a
+ * fallback when the dedicated container selector misses.
+ */
+const JD_START_MARKER =
+  /(?:Role\s+Introduction|Job\s+Description|About\s+the\s+Role|The\s+Role|Key\s+Responsibilities|Responsibilities|Job\s+Purpose|Position\s+Overview)/i;
+
+/**
+ * Where the job description stops.
+ *
+ * Cathay appends ~750 characters of equal-opportunities boilerplate to every
+ * posting. Left in, it occupies the entire tail of the enrichment prompt's
+ * head+tail truncation window — which is precisely where the Requirements section
+ * lives — so the model would be handed a privacy notice instead of the
+ * qualifications. Cutting here is what keeps "Requirements" in the prompt.
+ */
+const JD_END_MARKER = /Personal\s+&\s+Application\s+Information|Equal\s+Opportunities\s+Employer/i;
+
+/**
+ * The deadline is published in the page's meta header
+ * ("Application deadline: 29 Sep 2026"), not in the description body, so it is
+ * lifted separately and prepended. The text is passed through verbatim and parsed
+ * later by `inferApplicationDeadline` — date parsing stays in one place.
+ */
+const DEADLINE_SNIPPET = /Application\s+deadline\s*[:：]\s*[^<]{1,60}/i;
+
+/**
+ * Fetch and parse one job detail page.
+ *
+ * The detail page is server-rendered, so a plain HTTP fetch returns the full
+ * description and the deadline — no browser needed, which keeps the detail stage
+ * cheap enough to run on every job.
+ */
+async function fetchCathayJobDetail(
+  absoluteUrl: string,
+  logger: ScrapeContext['logger'],
+): Promise<{ title: string | undefined; description: string | undefined } | null> {
+  try {
+    const html = await fetchHtmlWithRetry(absoluteUrl, logger, 'detail');
+
+    const title = extractTagText(html, 'h1');
+
+    // Preferred: the dedicated description container. Ending at `button-bar`, the
+    // sibling immediately after the grid, keeps the share/apply controls out.
+    let section =
+      extractHtmlSection(
+        html,
+        /<div[^>]*class="[^"]*job-detail__grid[^"]*"[^>]*>/i,
+        /<div[^>]*class="[^"]*button-bar[^"]*"/i,
+      ) ??
+      extractHtmlSection(
+        html,
+        /<div[^>]*class="[^"]*job-detail__grid[^"]*"[^>]*>/i,
+        /<\/main>/i,
+      );
+
+    // Fallback: slice from the first description heading to the end of <main>.
+    if (!section) {
+      const start = html.search(JD_START_MARKER);
+      if (start >= 0) {
+        const mainEnd = html.indexOf('</main>', start);
+        section = html.slice(start, mainEnd > start ? mainEnd : undefined);
+      }
+    }
+
+    let description = section ? stripHtmlToText(section) : '';
+
+    // Trim the equal-opportunities boilerplate off the end.
+    const endIndex = description.search(JD_END_MARKER);
+    if (endIndex > 0) description = description.slice(0, endIndex).trim();
+
+    const deadlineSnippet = html.match(DEADLINE_SNIPPET)?.[0];
+    const withDeadline = [deadlineSnippet, description].filter((part) => part && part.length > 0);
+
+    return {
+      title: title && title.length >= 3 ? title : undefined,
+      description: withDeadline.length > 0 ? withDeadline.join('\n\n') : undefined,
+    };
+  } catch (error) {
+    logger.warn('Cathay detail fetch failed', { url: absoluteUrl, error: String(error) });
+    return null;
+  }
+}
+
+/**
+ * Fill description (and, through it, deadline and years-of-experience) from detail
+ * pages.
+ *
+ * Why this stage exists: the listing cards carry no description and no deadline, so
+ * without it every Cathay job reaches the LLM enrichment layer with nothing to
+ * summarise, every deadline is null, and the deterministic backfill has no text to
+ * read a closing date out of. The deadline in particular is only ever published on
+ * the detail page ("Application deadline: 29 Sep 2026").
+ *
+ * Fail-soft by design: a job whose detail page cannot be fetched keeps its listing
+ * fields and is still ingested, so a partial outage degrades quality rather than
+ * dropping postings.
+ */
+async function enrichCathayJobsFromDetailPages(
+  jobs: RawJob[],
+  logger: ScrapeContext['logger'],
+  options: { concurrency: number; maxJobs: number },
+): Promise<{ enriched: number; failed: number; skipped: number }> {
+  const limit = Math.max(0, options.maxJobs);
+  const targets = jobs.slice(0, limit === 0 ? jobs.length : limit);
+  const skipped = jobs.length - targets.length;
+
+  let enriched = 0;
+  let failed = 0;
+  const queue = [...targets];
+
+  // The shared throttle still paces requests globally; this only stops the workers
+  // from serialising on each other's latency.
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const job = queue.shift();
+      if (!job) return;
+      const url = typeof job.url === 'string' ? job.url : '';
+      if (!url) continue;
+
+      const detail = await fetchCathayJobDetail(url, logger);
+      if (!detail) {
+        failed += 1;
+        continue;
+      }
+
+      // The detail page's h1 is authoritative; the card text is a fallback that can
+      // still carry the department and employment type.
+      if (detail.title) job.title = detail.title;
+      if (detail.description) job.description = detail.description;
+      enriched += 1;
+    }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.max(1, options.concurrency) }, () => worker()),
+  );
+
+  return { enriched, failed, skipped };
+}
+
+/**
  * Derive the job location from a Cathay detail URL slug.
  * Detail URLs embed the region: /en/careers/jobs/hong-kong/<slug>-<id>.
  * Returns "Hong Kong" for HK jobs, undefined when the region is unknown.
  */
-function locationFromCathayDetailUrl(absoluteUrl: string): string | undefined {
-  try {
+function locationFromCathayDetailUrl(absoluteUrl: string): string | undefined {  try {
     const u = new URL(absoluteUrl);
     const segments = u.pathname.toLowerCase().split('/').filter(Boolean);
     const jobsIndex = segments.indexOf('jobs');
@@ -1060,7 +1210,6 @@ async function extractFromPage(
     .catch(() => {});
   await page.waitForTimeout(1500).catch(() => {});
 
-  const pageText = await page.locator('body').innerText({ timeout: 10_000 }).catch(() => '');
   const scripts = await page
     .$$eval('script', (nodes) => nodes.map((n) => n.textContent ?? '').filter(Boolean))
     .catch(() => [] as string[]);
@@ -1080,34 +1229,51 @@ async function extractFromPage(
     .$$eval('a[href]', (nodes) =>
       nodes.map((node) => ({
         href: node.getAttribute('href') ?? '',
-        text: node.textContent ?? '',
-        cardText: node.closest('article, li, div')?.textContent ?? '',
+        // Read the card's own title node. The anchor wraps the ENTIRE card, so
+        // `node.textContent` is "TITLE DEPARTMENT LOCATION EMPLOYMENT TYPE" — using
+        // it as the title is what produced 87-to-157-character "titles" and threw
+        // away every prop. Props are read as a list rather than by index so a card
+        // without a department does not shift location into the department slot.
+        titleNode: node.querySelector('.search-listing__item__title')?.textContent ?? '',
+        anchorText: node.textContent ?? '',
+        props: Array.from(node.querySelectorAll('.search-listing__item__props__item'))
+          .map((el) => el.textContent ?? '')
+          .filter((value) => value.trim().length > 0),
       })),
     )
-    .catch(() => [] as Array<{ href: string; text: string; cardText: string }>);
+    .catch(
+      () => [] as Array<{ href: string; titleNode: string; anchorText: string; props: string[] }>,
+    );
 
   for (const link of links) {
     const href = link.href.trim();
     if (!href) continue;
-    if (!/job|career|position|vacanc/i.test(href) && !/job|career|position|vacanc/i.test(link.text)) continue;
+    if (!/job|career|position|vacanc/i.test(href) && !/job|career|position|vacanc/i.test(link.anchorText)) continue;
     const absoluteUrl = toAbsoluteUrl(href, pageUrl);
     if (!isCathayJobDetailUrl(absoluteUrl)) continue;
-    const title = normalizeText(link.text) || normalizeText(link.cardText);
-    if (!title) continue;
-    const externalId = normalizeExternalId(absoluteUrl, title);
+
+    const card = parseCathayCard(link.titleNode, link.anchorText, link.props);
+    if (!card.title) continue;
+
+    const externalId = normalizeExternalId(absoluteUrl, card.title);
     if (seen.has(externalId)) continue;
     seen.add(externalId);
-    // DOM listing cards carry no location field; the detail URL slug encodes it
-    // (e.g. /careers/jobs/hong-kong/assistant-manager-...-31892). Derive it so the
-    // HK-only filter can keep these jobs.
+    // The listing card carries no description — the detail stage fills it. Passing
+    // `pageText` here would attach the same 2,000-character blob of every card on
+    // the page to every job, which is worse than having no description at all:
+    // the enrichment layer would summarise the whole page instead of one posting.
     jobs.push({
       externalId,
       companyName,
       companyDomain: sourceDomain,
       locale,
-      title,
-      location: locationFromCathayDetailUrl(absoluteUrl),
-      description: normalizeText(link.cardText) || title || pageText.slice(0, 500),
+      title: card.title,
+      // The detail URL slug encodes the region (/careers/jobs/hong-kong/...) and is
+      // more reliable than the card's location prop, so prefer it.
+      location: locationFromCathayDetailUrl(absoluteUrl) ?? card.location,
+      department: card.department,
+      rawEmploymentType: card.employmentType,
+      employmentType: card.employmentType,
       url: absoluteUrl,
       applyUrl: absoluteUrl,
       source: 'COMPANY_WEBSITE',
@@ -1117,9 +1283,8 @@ async function extractFromPage(
       localizedContents: [
         {
           locale,
-          title,
-          location: undefined,
-          description: normalizeText(link.cardText) || title || pageText.slice(0, 500),
+          title: card.title,
+          location: card.location,
           url: absoluteUrl,
           applyUrl: absoluteUrl,
         },
@@ -1684,6 +1849,20 @@ export class CathayPacificAdapter implements ScraperAdapter {
       jobs.splice(0, jobs.length, ...hongKongJobs);
 
       ctx.logger.info(`Cathay Pacific adapter filtered to ${hongKongJobs.length} Hong Kong jobs (from ${preFilterCount} total)`);
+
+      // Detail stage. The listing cards carry neither a description nor a deadline,
+      // and Cathay only publishes both on the detail page, so this is what makes the
+      // enrichment layer and the deadline column work at all for this source.
+      if (cfg.includeDetailPages !== false && hongKongJobs.length > 0) {
+        const maxDetailJobs = Number.isFinite(cfg.maxDetailJobs)
+          ? Math.max(0, Number(cfg.maxDetailJobs))
+          : DEFAULT_DETAIL_MAX_JOBS;
+        const detailStats = await enrichCathayJobsFromDetailPages(hongKongJobs, ctx.logger, {
+          concurrency: Math.max(1, parsePositiveInt(process.env.CATHAY_DETAIL_CONCURRENCY, 3)),
+          maxJobs: maxDetailJobs,
+        });
+        ctx.logger.info('Cathay detail stage finished', { ...detailStats });
+      }
     } catch (err) {
       if (err instanceof RateLimitStopError) {
         errors.push({ message: err.message });

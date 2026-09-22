@@ -12,9 +12,11 @@
     "install:browsers": "playwright install --with-deps chromium",
     "scrape": "tsx src/cli.ts",
     "scrape:dry": "tsx src/cli.ts --dry-run",
-    "check": "tsx scripts/check-backfill.ts && tsx scripts/check-llm.ts",
+    "check": "tsx scripts/check-backfill.ts && tsx scripts/check-hk-time.ts && tsx scripts/check-llm.ts && tsx scripts/check-push.ts",
     "check:backfill": "tsx scripts/check-backfill.ts",
-    "check:llm": "tsx scripts/check-llm.ts"
+    "check:hk-time": "tsx scripts/check-hk-time.ts",
+    "check:llm": "tsx scripts/check-llm.ts",
+    "check:push": "tsx scripts/check-push.ts"
   },
   "dependencies": {
     "bottleneck": "^2.19.5",

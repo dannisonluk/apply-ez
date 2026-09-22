@@ -80,6 +80,11 @@ jobs:
           # so those are genuinely new and do get summarised. The per-run cap keeps
           # one big crawl from draining the free-tier daily quota.
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          # Deliberately OFF here. The full crawl runs at 03:20 Hong Kong time and
+          # can surface a large batch of older postings that the incremental run
+          # never paginated to. Waking the user for a backfill would be noise —
+          # the 4-hourly incremental run owns notifications.
+          PUSH_ENABLED: 'false'
           LOG_LEVEL: info
           SCRAPER_MIN_TIME_MS: '1000'
           SCRAPER_MAX_CONCURRENT: '2'

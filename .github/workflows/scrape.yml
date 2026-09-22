@@ -85,6 +85,10 @@ jobs:
           # Optional. Without it the scraper still runs; new jobs just stay at
           # enrich_status = PENDING and are picked up on a later run.
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          # Expo push. Only sends when a run actually finds new jobs and at least
+          # one device has registered.
+          PUSH_ENABLED: 'true'
+          EXPO_ACCESS_TOKEN: ${{ secrets.EXPO_ACCESS_TOKEN }}
           LOG_LEVEL: info
           SCRAPER_MIN_TIME_MS: '1000'
           SCRAPER_MAX_CONCURRENT: '2'

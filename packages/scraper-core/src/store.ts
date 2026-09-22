@@ -350,6 +350,33 @@ export class JobStore {
     }
   }
 
+  /**
+   * Enabled push tokens.
+   *
+   * Only the service role can read this table — the anon policy grants insert and
+   * update but deliberately not select, so tokens cannot be harvested from the
+   * app. See `supabase/migrations/0002_push_tokens.sql`.
+   */
+  async listPushTokens(): Promise<Array<{ token: string; device_id: string | null; platform: string | null }>> {
+    const rows = await this.send<
+      Array<{ token: string; device_id: string | null; platform: string | null }>
+    >('GET', '/push_tokens', {
+      query: 'select=token,device_id,platform&enabled=is.true',
+    });
+    return rows ?? [];
+  }
+
+  /** Disable tokens Expo reported as `DeviceNotRegistered`. */
+  async disablePushTokens(tokens: string[]): Promise<void> {
+    for (const token of tokens) {
+      await this.send('PATCH', '/push_tokens', {
+        body: { enabled: false, last_seen_at: new Date().toISOString() },
+        prefer: 'return=minimal',
+        query: `token=eq.${encodeURIComponent(token)}`,
+      });
+    }
+  }
+
   /** Append a row to scrape_runs for observability. */
   async recordRun(input: ScrapeRunInput): Promise<void> {
     await this.send('POST', '/scrape_runs', {

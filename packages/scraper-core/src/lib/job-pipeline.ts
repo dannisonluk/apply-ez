@@ -5,6 +5,7 @@ import {
   normalizeJobEmploymentType,
   type JobIngest,
 } from '../types/index.js';
+import { parseHongKongDateTime } from './hk-time.js';
 
 /**
  * Normalizes raw adapter output before it reaches API validation.
@@ -92,11 +93,11 @@ function normalizeDateTime(value: unknown): string {
 }
 
 function normalizeOptionalDateTime(value: unknown): string | undefined {
-  const text = asTrimmed(value);
-  if (!text) return undefined;
-  const date = new Date(text);
-  if (Number.isNaN(date.getTime())) return undefined;
-  return date.toISOString();
+  // Deadlines are parsed against Hong Kong time, not the runtime's timezone.
+  // Using `new Date(text)` here made the stored instant depend on where the
+  // scraper ran — a UTC CI runner and a UTC+8 laptop disagreed by eight hours,
+  // which is enough to shift a deadline onto the wrong day in the app.
+  return parseHongKongDateTime(value);
 }
 
 function normalizeInteger(value: unknown): number | undefined {

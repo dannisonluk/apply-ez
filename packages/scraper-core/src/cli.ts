@@ -7,6 +7,7 @@ import { prepareJobsForIngest } from './lib/job-pipeline.js';
 import { standardizeJobs } from './lib/job-standardizer.js';
 import { defaultEnrichOptions, enrichJobs } from './lib/llm/enrich.js';
 import type { StoredInsight } from './lib/llm/schema.js';
+import { notifyNewJobs } from './notify.js';
 import { JobStore } from './store.js';
 import { enabledTargets, getTarget, SCRAPE_TARGETS, type ScrapeTarget } from './targets.js';
 
@@ -82,6 +83,7 @@ interface TargetRunResult {
   enriched: number;
   enrichFailed: number;
   enrichSkipped: number;
+  pushed: number;
 }
 
 async function runTarget(
@@ -167,6 +169,7 @@ async function runTarget(
     enriched: 0,
     enrichFailed: 0,
     enrichSkipped: 0,
+    pushed: 0,
   };
 
   if (!options.store) {
@@ -254,6 +257,16 @@ async function runTarget(
 
   if (upserted.newExternalIds.length > 0) {
     targetLogger.info({ newJobs: upserted.newExternalIds.length }, 'new jobs found');
+
+    // Notify after the write succeeds, so a device is never told about a job that
+    // failed to persist.
+    const notified = await notifyNewJobs({
+      store,
+      jobs,
+      newExternalIds: upserted.newExternalIds,
+      logger: targetLogger,
+    });
+    if (notified) result.pushed = notified.accepted;
   }
 
   if (options.full && config.reconcileMissingJobs === true) {
@@ -338,6 +351,7 @@ async function main(): Promise<void> {
     adapterErrors: results.reduce((sum, r) => sum + r.errors, 0),
     enriched: results.reduce((sum, r) => sum + r.enriched, 0),
     enrichFailed: results.reduce((sum, r) => sum + r.enrichFailed, 0),
+    pushed: results.reduce((sum, r) => sum + r.pushed, 0),
   };
   logger.info(summary, 'run complete');
   if (failures.length > 0) logger.warn({ failures }, 'targets that failed');

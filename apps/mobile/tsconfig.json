@@ -1,0 +1,16 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    // Matches the scraper's strictness so a null check that matters in one
+    // project is not silently optional in the other.
+    "noUncheckedIndexedAccess": true,
+    // Deliberately OFF, unlike the scraper: React Native's own prop types use
+    // optional properties in ways that `exactOptionalPropertyTypes` rejects, so
+    // enabling it here produces noise in library types rather than in our code.
+    "exactOptionalPropertyTypes": false,
+    "noEmit": true
+  },
+  "include": ["app/**/*.ts", "app/**/*.tsx", "src/**/*.ts", "src/**/*.tsx", "expo-env.d.ts"],
+  "exclude": ["node_modules"]
+}

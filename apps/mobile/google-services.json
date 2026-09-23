@@ -7,9 +7,9 @@
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:844911607009:android:e5a442a097ba5507adcba0",
+        "mobilesdk_app_id": "1:844911607009:android:fe97d759090661f5adcba0",
         "android_client_info": {
-          "package_name": "com.dannisonluk.applyez"
+          "package_name": "hk.applyez.app"
         }
       },
       "oauth_client": [],

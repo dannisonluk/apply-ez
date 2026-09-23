@@ -16,10 +16,10 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.dannisonluk.applyez"
+      "bundleIdentifier": "hk.applyez.app"
     },
     "android": {
-      "package": "com.dannisonluk.applyez",
+      "package": "hk.applyez.app",
       "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "backgroundColor": "#0B1220",

@@ -53,7 +53,14 @@ supabase/migrations/0002_push_tokens.sql                 device push tokens
 supabase/migrations/0003_relevance_applications_codes.sql
     relevance columns · EXPIRED made visible · app_settings ·
     app_unlock / record_application / list_applications / set_app_codes
+supabase/migrations/0004_dedupe_includes_company.sql
+    job uniqueness becomes (company_id, source, external_id)
 ```
+
+**0004 must be applied before the scraper code that depends on it is deployed.**
+The upsert's conflict target changed to `company_id,source,external_id`, and
+Postgres rejects an `ON CONFLICT` that matches no constraint — so running the new
+code against the old schema fails every write with `42P10`, rather than degrading.
 
 Then push the two application codes to the server (see
 [Application codes](#application-codes-and-applied-jobs)):
@@ -598,7 +605,7 @@ Two things generalise from this:
 Run the regression checks:
 
 ```bash
-pnpm --filter @apply-ez/scraper-core check           # all eleven suites, 711 assertions
+pnpm --filter @apply-ez/scraper-core check           # all eleven suites, 720 assertions
 pnpm --filter @apply-ez/scraper-core check:backfill  # 40
 pnpm --filter @apply-ez/scraper-core check:hk-time   # 51
 pnpm --filter @apply-ez/scraper-core check:location  # 35
@@ -607,7 +614,7 @@ pnpm --filter @apply-ez/scraper-core check:llm       # 91
 pnpm --filter @apply-ez/scraper-core check:push      # 33
 pnpm --filter @apply-ez/scraper-core check:store     # 19
 pnpm --filter @apply-ez/scraper-core check:http      # 37
-pnpm --filter @apply-ez/scraper-core check:workday   # 56
+pnpm --filter @apply-ez/scraper-core check:workday   # 65
 pnpm --filter @apply-ez/scraper-core check:platform  # 98
 pnpm --filter @apply-ez/scraper-core check:oracle    # 46
 

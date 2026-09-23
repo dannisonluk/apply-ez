@@ -306,7 +306,13 @@ export class JobStore {
       await this.send('POST', '/jobs', {
         body: chunk,
         prefer: 'resolution=merge-duplicates,return=minimal',
-        query: 'on_conflict=source,external_id',
+        // `company_id` is part of the conflict target, and has to be: `source` is
+        // the literal 'COMPANY_WEBSITE' for every target, so a two-column target is
+        // effectively `external_id` alone. Two employers on the same ATS — AIA and
+        // Manulife both run Workday, HSBC and Morgan Stanley both run Eightfold —
+        // can issue the same id, and without company_id the second upsert would
+        // silently overwrite the first row's company, title and url.
+        query: 'on_conflict=company_id,source,external_id',
       });
     }
 

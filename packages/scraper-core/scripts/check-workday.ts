@@ -17,7 +17,7 @@
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { WorkdayAdapter, parseWorkdayBullets, parseWorkdayUrl } from '../src/adapters/workday.adapter.js';
+import { WorkdayAdapter, externalIdFromPath, parseWorkdayBullets, parseWorkdayUrl } from '../src/adapters/workday.adapter.js';
 import type { ScrapeContext } from '../src/adapters/adapter.interface.js';
 import { hongKongDateOf } from '../src/lib/hk-time.js';
 import { configureRateLimit } from '../src/lib/rate-limit.js';
@@ -370,6 +370,44 @@ async function main(): Promise<void> {
     new WorkdayAdapter().scrape(context(base, { maxJobs: 25, maxDetailJobs: 0 })),
   );
   check('crawl: maxJobs caps the result', cappedResult.jobs.length, 25);
+
+  // ── externalIdFromPath: the id must not depend on the detail fetch ────────
+  //
+  // The bug being guarded: the id used to be `detail.jobReqId || path tail || path`,
+  // so a run whose detail stage tripped the failure circuit produced a DIFFERENT id
+  // for the same posting — and the upsert then INSERTed a duplicate row instead of
+  // updating the existing one. Every path below is taken verbatim from a live AIA or
+  // Manulife row, and the expected value is the id already stored for it, so this
+  // doubles as a pin that switching to the path rewrites no existing data.
+  const ID_CASES: Array<[string, string]> = [
+    [
+      '/External/job/Hong-Kong-HK-AIA-Group-Office/Associate-Director--Agency-Distribution-Learning---Development_JR-68991',
+      'JR-68991',
+    ],
+    // A trailing "-1" is Workday's own duplicate marker, not part of the id.
+    [
+      '/External/job/Hong-Kong-HK-AIA-Hong-Kong--Macau/Service--Advisor-I_JR-67172-1',
+      'JR-67172',
+    ],
+    [
+      '/External/job/Hong-Kong-HK-AIA-Hong-Kong--Macau/Business-Development--HNW-Business--Principal---Consultant_JR-70092-3',
+      'JR-70092',
+    ],
+    [
+      '/External/job/Hong-Kong-HK-AIA-Group-Office/XMLNAME-2026-2H-Actuarial-Internship-Programme--AIA-Group-Office_JR-61517',
+      'JR-61517',
+    ],
+    ['/MFCJH_Jobs/job/Hong-Kong/Senior-Manager--Sales-Support_JR26080312', 'JR26080312'],
+    ['/MFCJH_Jobs/job/Hong-Kong/Director--Product-Proposition---Solutions_JR26050912-1', 'JR26050912'],
+    ['/MFCJH_Jobs/job/Hong-Kong/Full-stack-Software-Engineer_JR26071268-1', 'JR26071268'],
+  ];
+  for (const [path, expected] of ID_CASES) {
+    check(`id: ${path.slice(-26)}`, externalIdFromPath(path), expected);
+  }
+  // A path with no requisition token still has to yield something stable, since a
+  // null id would fall back to the detail and reintroduce the whole problem.
+  check('id: falls back to the path tail', externalIdFromPath('/job/Hong-Kong/Some-Role'), 'Some-Role');
+  check('id: same path gives the same id', externalIdFromPath(ID_CASES[0]![0]), externalIdFromPath(ID_CASES[0]![0]));
 
   // ── a non-Workday entry URL fails loudly rather than silently ─────────────
   const badUrl = await new WorkdayAdapter().scrape({

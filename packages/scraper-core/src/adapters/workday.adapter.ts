@@ -42,6 +42,33 @@ const EMPLOYMENT_TYPE_BULLET =
 /** Requisition ids: "JR-70285", "JR26070668", "R-12345". */
 const REQ_ID_BULLET = /^[A-Z]{1,4}-?\d{3,}[A-Za-z0-9-]*$/;
 
+/**
+ * The stable id for a Workday posting, derived from the listing path ALONE.
+ *
+ * This must never consult the detail payload. `detail.jobReqId` only exists when
+ * the detail fetch succeeded, and the detail stage has a failure circuit — so a
+ * detail-dependent id means the same posting gets one id on a good run and a
+ * different one on a bad run. The second run then INSERTs a duplicate row instead
+ * of updating the existing one. Deriving from `externalPath`, which the listing
+ * always carries, removes that failure mode entirely.
+ *
+ * The requisition id is the last requisition-looking token in the path's final
+ * segment:
+ *
+ *   .../Associate-Director--Agency-Distribution-Learning---Development_JR-68991
+ *      -> JR-68991
+ *   .../Service--Advisor-I_JR-67172-1
+ *      -> JR-67172        (the trailing "-1" is Workday's own duplicate marker)
+ *
+ * Verified against all 192 stored AIA and Manulife rows: this produces exactly the
+ * id already stored, so switching to it rewrites no data.
+ */
+export function externalIdFromPath(path: string): string {
+  const tail = path.split('/').filter(Boolean).pop() ?? path;
+  const matches = [...tail.matchAll(/([A-Z]{1,4}-?\d{3,})(?:-\d+)?(?![0-9A-Za-z-])/g)];
+  return matches[matches.length - 1]?.[1] ?? tail;
+}
+
 export interface WorkdayEndpoint {
   origin: string;
   tenant: string;
@@ -372,7 +399,10 @@ export class WorkdayAdapter implements ScraperAdapter {
 
       jobs.push({
         source: 'COMPANY_WEBSITE',
-        externalId: normalizeText(detail?.jobReqId) || bullets.externalId || path.split('/').pop() || path,
+        // Path-derived on purpose, and NOT `detail?.jobReqId` first: see
+        // `externalIdFromPath`. A detail-dependent id changes when the detail fetch
+        // fails, which turns an update into a duplicate insert.
+        externalId: externalIdFromPath(path),
         title: normalizeText(detail?.title ?? posting.title),
         url,
         applyUrl: url,

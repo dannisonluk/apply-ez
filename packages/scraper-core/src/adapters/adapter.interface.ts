@@ -11,6 +11,39 @@ export interface ScrapeContext {
     warn: (msg: string, ctx?: Record<string, unknown>) => void;
     error: (msg: string, ctx?: Record<string, unknown>) => void;
   };
+
+  /**
+   * External ids already stored for this target, when the run is incremental.
+   *
+   * `undefined` means a **full** crawl: fetch everything, as before. A `Set` means
+   * the caller only needs what is new, and adapters should act on it in two ways:
+   *
+   *   1. **Skip the detail stage for ids in the set.** Detail pages are the whole
+   *      cost of a run — roughly 1,000 requests per full crawl, of which about 80%
+   *      re-fetch postings already stored. Nothing is lost by skipping them on a
+   *      6-hourly run, because the daily `--full` run refreshes every row.
+   *   2. **Stop paginating once a page adds no new ids**, which is what makes this
+   *      incremental rather than "full crawl with a cheaper tail". Only valid when
+   *      the listing is sorted newest-first; see `sortBy` in each target's config.
+   *
+   * Deliberately NOT used to skip a job entirely: the listing row is still upserted,
+   * so `last_seen_at` keeps moving and a posting that disappears is still detected.
+   */
+  knownExternalIds?: ReadonlySet<string> | undefined;
+}
+
+/** True when the caller wants only what is new (see `knownExternalIds`). */
+export function isIncremental(ctx: ScrapeContext): boolean {
+  return ctx.knownExternalIds !== undefined;
+}
+
+/**
+ * True when this job's detail page can be skipped: incremental run, and the job is
+ * already stored. A full crawl always returns false, so `--full` behaves exactly as
+ * it did before.
+ */
+export function canSkipDetail(ctx: ScrapeContext, externalId: string): boolean {
+  return ctx.knownExternalIds?.has(externalId) === true;
 }
 
 /**

@@ -260,6 +260,36 @@ new  ==  first_seen_at > lastOpenedAt
 - On first launch there is no baseline, so nothing is flagged — the badge starts
   honest at zero rather than claiming the entire backlog is new.
 
+## Incremental crawls
+
+The 6-hourly run is incremental; the daily `--full` run is not. `--full` is the only
+mode that gets a complete listing, because `reconcileMissing` infers "absent from the
+listing ⇒ missing ⇒ eventually EXPIRED" — handing it a truncated list would retire
+live postings.
+
+Two mechanisms, and only one of them is load-bearing:
+
+- **`knownExternalIds` bounds the crawl.** `cli.ts` resolves the stored ids *before*
+  the crawl and passes them to the adapter, which may stop paginating once a page
+  adds nothing unseen. That is opt-in per target (`incrementalStopOnKnown`) because
+  it is only sound where the listing is known to be date-descending. Workday is —
+  verified against both tenants — and it ignores a `sortBy` hint, so there is no
+  parameter to set. Every other target still crawls to the end.
+- **Already-stored postings are filtered out after the crawl**, once, in `cli.ts`.
+
+The second is the one that matters, and it is central on purpose. The upsert writes
+`application_deadline`, `apply_url` and `work_schedule` as `?? null`, so a posting
+written from a listing-only view — no detail page fetched — would have its stored
+deadline and apply URL **erased**. An earlier version of this change skipped the
+detail fetch per adapter for known postings, which is exactly that bug; it was caught
+by reading what the upsert actually sends. Filtering once after the crawl means an
+adapter cannot get it wrong, and it is what makes any detail-skipping safe rather
+than destructive.
+
+Measured effect: a full run re-scrapes 736 postings, 588 of which are already stored,
+and issues roughly 1,000 detail requests. An incremental run stops at the first page
+with nothing new, so the work is proportional to what actually changed.
+
 ## Hong Kong scope
 
 Every target is HK-scoped at the source — Workday's `locationCountry`, Phenom's
@@ -605,7 +635,7 @@ Two things generalise from this:
 Run the regression checks:
 
 ```bash
-pnpm --filter @apply-ez/scraper-core check           # all eleven suites, 720 assertions
+pnpm --filter @apply-ez/scraper-core check           # all eleven suites, 727 assertions
 pnpm --filter @apply-ez/scraper-core check:backfill  # 40
 pnpm --filter @apply-ez/scraper-core check:hk-time   # 51
 pnpm --filter @apply-ez/scraper-core check:location  # 35
@@ -614,7 +644,7 @@ pnpm --filter @apply-ez/scraper-core check:llm       # 91
 pnpm --filter @apply-ez/scraper-core check:push      # 33
 pnpm --filter @apply-ez/scraper-core check:store     # 19
 pnpm --filter @apply-ez/scraper-core check:http      # 37
-pnpm --filter @apply-ez/scraper-core check:workday   # 65
+pnpm --filter @apply-ez/scraper-core check:workday   # 72
 pnpm --filter @apply-ez/scraper-core check:platform  # 98
 pnpm --filter @apply-ez/scraper-core check:oracle    # 46
 

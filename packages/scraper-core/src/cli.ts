@@ -205,6 +205,32 @@ async function runTarget(
     ...(options.full ? { fullCrawl: true } : {}),
   };
 
+  // Resolve the company and what is already stored BEFORE the crawl, not after.
+  // An incremental run has to hand the adapter the known-id set so it can skip the
+  // detail pages for postings it already has; doing this after `adapter.scrape` —
+  // which is where it used to live — makes that impossible. `upsertCompany` is
+  // idempotent, so moving it earlier costs nothing.
+  //
+  // A dry run has no store and therefore no known-id set, which keeps `--dry-run` a
+  // full crawl: the point of a dry run is to see what the site actually has.
+  let companyId: string | null = null;
+  let existingExternalIds = new Set<string>();
+  if (options.store) {
+    companyId = await options.store.upsertCompany({
+      slug: target.companySlug,
+      name: target.companyName,
+      domain: target.companyDomain,
+      careersUrl: target.entryUrls[0] ?? '',
+    });
+    existingExternalIds = await options.store.listExistingExternalIds(companyId, JOB_SOURCE);
+  }
+
+  // `--full` is the only mode that gets a complete crawl. `reconcileMissing` infers
+  // "absent from the listing ⇒ missing ⇒ eventually EXPIRED", so handing it a
+  // truncated listing would retire live postings — the incremental set is withheld
+  // there on purpose.
+  const incremental = options.store !== null && !options.full;
+
   const ctx: ScrapeContext = {
     targetId: target.id,
     urlTemplate: target.entryUrls[0],
@@ -216,13 +242,47 @@ async function runTarget(
       warn: (message, context) => targetLogger.warn(context ?? {}, message),
       error: (message, context) => targetLogger.error(context ?? {}, message),
     },
+    ...(incremental ? { knownExternalIds: existingExternalIds } : {}),
   };
 
-  targetLogger.info({ entryUrls: target.entryUrls, full: options.full }, 'scrape started');
+  targetLogger.info(
+    {
+      entryUrls: target.entryUrls,
+      full: options.full,
+      incremental,
+      known: incremental ? existingExternalIds.size : 0,
+    },
+    'scrape started',
+  );
   const scraped = await adapter.scrape(ctx);
 
+  // An incremental run returns the newest-first window, including postings we
+  // already have. Drop those before anything downstream sees them.
+  //
+  // This is the load-bearing part of the incremental mode, and it lives here rather
+  // than inside each adapter on purpose. The upsert writes `application_deadline`,
+  // `apply_url` and `work_schedule` as `?? null`, so a posting written from a
+  // listing-only view — no detail page fetched — would have its stored deadline and
+  // apply URL erased. Filtering once here means an adapter cannot get that wrong
+  // twelve times over; and because known postings never reach the upsert, skipping
+  // their detail fetches is safe rather than destructive.
+  const fresh = incremental
+    ? scraped.jobs.filter((job) => !existingExternalIds.has(job.externalId))
+    : scraped.jobs;
+
+  if (incremental) {
+    targetLogger.info(
+      {
+        listed: scraped.jobs.length,
+        alreadyStored: scraped.jobs.length - fresh.length,
+        fresh: fresh.length,
+      },
+      'incremental run: already-stored postings filtered out',
+    );
+  }
+
   // 1. Backfill gaps BEFORE the pipeline strips description text.
-  const backfilled = backfillRawJobs(scraped.jobs, { locationFallback: 'Hong Kong' });
+  const backfilled = backfillRawJobs(fresh, { locationFallback: 'Hong Kong' });
 
   // 2. Normalize + validate + scope + de-duplicate.
   //
@@ -255,7 +315,7 @@ async function runTarget(
 
   targetLogger.info(
     {
-      scraped: scraped.jobs.length,
+      scraped: fresh.length,
       dropped: prepared.dropped.length,
       outOfScope: outOfScope.length,
       duplicates: prepared.duplicateCount,
@@ -295,7 +355,7 @@ async function runTarget(
   const result: TargetRunResult = {
     targetId: target.id,
     adapter: target.adapter,
-    scraped: scraped.jobs.length,
+    scraped: fresh.length,
     dropped: prepared.dropped.length,
     duplicates: prepared.duplicateCount,
     inserted: 0,
@@ -350,14 +410,9 @@ async function runTarget(
 
   const store = options.store;
 
-  const companyId = await store.upsertCompany({
-    slug: target.companySlug,
-    name: target.companyName,
-    domain: target.companyDomain,
-    careersUrl: target.entryUrls[0] ?? '',
-  });
-
-  const existingExternalIds = await store.listExistingExternalIds(companyId, JOB_SOURCE);
+  // `companyId` and `existingExternalIds` were resolved before the crawl — see the
+  // note above `adapter.scrape`. Nothing to re-resolve here.
+  if (!companyId) throw new Error('internal: companyId was not resolved before the crawl');
 
   // ── Write first, enrich second ──────────────────────────────────────────────
   // The database write deliberately happens BEFORE the LLM stage. Enrichment is

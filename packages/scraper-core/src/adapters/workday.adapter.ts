@@ -22,6 +22,7 @@
  * has not run — it is the cheapest target in the fleet by a wide margin.
  */
 import type { RawJob, ScrapeContext, ScrapeResult, ScraperAdapter } from './adapter.interface.js';
+import { canSkipDetail, isIncremental } from './adapter.interface.js';
 import { FailureCircuit } from '../lib/circuit.js';
 import { mapWithConcurrency, readPositiveInt } from '../lib/concurrency.js';
 import { normalizeText, stripHtmlToText } from '../lib/text.js';
@@ -211,6 +212,10 @@ export class WorkdayAdapter implements ScraperAdapter {
 
     const maxPages = readPositiveInt(ctx.config.maxPages, DEFAULT_MAX_PAGES);
     const maxJobs = readPositiveInt(ctx.config.maxJobs, DEFAULT_MAX_JOBS);
+    // Opt-in per target, not defaulted on: it is only sound where the listing order
+    // is known to be date-descending, and getting that wrong silently truncates the
+    // crawl rather than failing loudly.
+    const stopOnKnown = ctx.config.incrementalStopOnKnown === true;
     const searchText = typeof ctx.config.searchText === 'string' ? ctx.config.searchText : '';
     const locale = typeof ctx.config.locale === 'string' ? ctx.config.locale : 'en';
     const locationCountry = typeof ctx.config.locationCountry === 'string' ? ctx.config.locationCountry : undefined;
@@ -279,17 +284,22 @@ export class WorkdayAdapter implements ScraperAdapter {
       if (batch.length === 0) break;
 
       const before = listed.length;
+      let unseenIds = 0;
       for (const posting of batch) {
         const path = posting.externalPath;
         if (!path || seenPaths.has(path)) continue;
         seenPaths.add(path);
         listed.push(posting);
+        // "Unseen" is measured on the same path-derived id the job is stored under,
+        // so this cannot disagree with the known-id set.
+        if (!canSkipDetail(ctx, externalIdFromPath(path))) unseenIds += 1;
       }
 
       ctx.logger.info('workday: page done', {
         page: page + 1,
         collected: listed.length,
         reportedTotal: total,
+        unseenIds,
       });
 
       // Past the last page Workday WRAPS AROUND and re-serves page 1 instead of
@@ -299,6 +309,23 @@ export class WorkdayAdapter implements ScraperAdapter {
       if (listed.length === before) break;
       if (total > 0 && offset + PAGE_SIZE >= total) break;
       if (listed.length >= maxJobs) break;
+
+      // Incremental stop-on-known. Workday lists newest-first by default — verified
+      // against the live AIA tenant, which returns "Posted Today", "Posted Today",
+      // "Posted Yesterday", "Posted 2 Days Ago" — and it ignores a `sortBy` hint
+      // entirely, so there is no parameter to set. A page with nothing unseen means
+      // we are past the frontier.
+      //
+      // Opt-in per target, because it is only sound where the order is known to be
+      // date-descending. A full crawl carries no known-id set, so `isIncremental` is
+      // false and this branch is never taken.
+      if (isIncremental(ctx) && stopOnKnown && unseenIds === 0) {
+        ctx.logger.info('workday: stopping early — page held nothing new', {
+          page: page + 1,
+          collected: listed.length,
+        });
+        break;
+      }
     }
 
     ctx.logger.info('workday: listed', { collected: listed.length, reportedTotal: total });

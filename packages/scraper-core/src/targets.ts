@@ -69,6 +69,11 @@ export const SCRAPE_TARGETS: ScrapeTarget[] = [
       maxJobs: 400,
       includeDetailPages: true,
       maxDetailJobs: 200,
+      // Workday lists newest-first by default (verified against both tenants: AIA
+      // returns "Posted Today" then "Posted Yesterday", Manulife "Posted
+      // Yesterday" then "Posted 2 Days Ago"), and it ignores a `sortBy` hint, so
+      // there is no parameter to set. That is what makes stop-on-known sound here.
+      incrementalStopOnKnown: true,
       reconcileMissingJobs: true,
       locationCountry: 'd4afdeb461d446e4babd204bd102dba8',
       locale: 'en',
@@ -119,6 +124,11 @@ export const SCRAPE_TARGETS: ScrapeTarget[] = [
       maxJobs: 400,
       includeDetailPages: true,
       maxDetailJobs: 200,
+      // Workday lists newest-first by default (verified against both tenants: AIA
+      // returns "Posted Today" then "Posted Yesterday", Manulife "Posted
+      // Yesterday" then "Posted 2 Days Ago"), and it ignores a `sortBy` hint, so
+      // there is no parameter to set. That is what makes stop-on-known sound here.
+      incrementalStopOnKnown: true,
       reconcileMissingJobs: true,
       locationCountry: 'd4afdeb461d446e4babd204bd102dba8',
       locationCountryFacet: 'Location_Country',

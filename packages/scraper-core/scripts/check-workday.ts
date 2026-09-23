@@ -371,6 +371,44 @@ async function main(): Promise<void> {
   );
   check('crawl: maxJobs caps the result', cappedResult.jobs.length, 25);
 
+  // ── incremental: stop-on-known bounds the crawl ─────────────────────────────
+  //
+  // Where the saving comes from. A full crawl lists every posting and fetches a
+  // detail page for each — roughly 1,000 detail requests per run across the twelve
+  // targets. On an incremental run the listing is newest-first, so once a page adds
+  // nothing unseen we are past the frontier and everything after it is waste.
+  //
+  // Note what this deliberately does NOT do: it does not skip detail pages for
+  // postings that are already stored. Those postings are still returned by the
+  // adapter, and building a row for them from the listing alone would erase their
+  // stored deadline, apply URL and work schedule — the upsert writes those columns
+  // as `?? null`. Dropping known postings happens once in `cli.ts`, after the crawl,
+  // where it cannot be got wrong in twelve separate adapters.
+  const page0Known: MockOptions = { acceptedFacet: 'locationCountry', listingCalls: 0, detailCalls: 0 };
+  const page0Ids = new Set(Array.from({ length: PAGE_SIZE }, (_, i) => `JR-${70000 + i}`));
+  const stopped = await withMock(page0Known, async (base) =>
+    new WorkdayAdapter().scrape({
+      ...context(base, { incrementalStopOnKnown: true }),
+      knownExternalIds: page0Ids,
+    }),
+  );
+  check('incremental: stop-on-known ends after one listing call', page0Known.listingCalls, 1);
+  check('incremental: stopped crawl returns only page 0', stopped.jobs.length, PAGE_SIZE);
+  check('incremental: stop-on-known costs one page of details', page0Known.detailCalls, PAGE_SIZE);
+  check('incremental: stopped crawl reports no errors', stopped.errors.length, 0);
+
+  // The stop is opt-in, so a target whose listing order has not been verified keeps
+  // crawling to the end — it simply gains nothing from the known-id set.
+  const noStop: MockOptions = { acceptedFacet: 'locationCountry', listingCalls: 0, detailCalls: 0 };
+  const notStopped = await withMock(noStop, async (base) =>
+    new WorkdayAdapter().scrape({ ...context(base), knownExternalIds: page0Ids }),
+  );
+  check('incremental: without the flag the crawl runs to the end', notStopped.jobs.length, TOTAL);
+  check('incremental: without the flag every detail is still fetched', noStop.detailCalls, TOTAL);
+
+  // A full crawl carries no known-id set, so it must behave exactly as before.
+  check('full crawl fetches every detail', options.detailCalls, TOTAL);
+
   // ── externalIdFromPath: the id must not depend on the detail fetch ────────
   //
   // The bug being guarded: the id used to be `detail.jobReqId || path tail || path`,

@@ -38,6 +38,7 @@
  * empty array, so — unlike Workday — an empty batch is a usable stop signal.
  */
 import type { RawJob, ScrapeContext, ScrapeResult, ScraperAdapter } from './adapter.interface.js';
+import { canSkipDetail, isIncremental } from './adapter.interface.js';
 import { FailureCircuit } from '../lib/circuit.js';
 import { mapWithConcurrency, readPositiveInt } from '../lib/concurrency.js';
 import { normalizeText, stripHtmlToText } from '../lib/text.js';
@@ -216,6 +217,17 @@ interface ListingPage {
 
 type ListingAttempt = { ok: true; page: ListingPage } | { ok: false; detail: string };
 
+/**
+ * The id a position is stored under.
+ *
+ * Extracted so the incremental stop and the emitted `externalId` cannot drift apart.
+ * If they disagreed, the stop would measure newness against the wrong key and could
+ * end a crawl early while postings it had not yet seen were still ahead of it.
+ */
+function eightfoldId(position: EightfoldPosition): string {
+  return String(position.id ?? position.display_job_id ?? position.ats_job_id ?? '');
+}
+
 function resolveListingApi(value: unknown): EightfoldListingApi | 'auto' {
   return value === 'pcsx' || value === 'apply-v2' || value === 'auto' ? value : 'auto';
 }
@@ -257,6 +269,10 @@ export class EightfoldAdapter implements ScraperAdapter {
 
     const num = readPositiveInt(ctx.config.num, DEFAULT_NUM);
     const maxJobs = readPositiveInt(ctx.config.maxJobs, DEFAULT_MAX_JOBS);
+    // Opt-in per target: only sound where the listing is known to be date-descending.
+    // HSBC lists two pinned postings above an otherwise strictly descending run, so
+    // this is switched on only for targets whose order has actually been checked.
+    const stopOnKnown = ctx.config.incrementalStopOnKnown === true;
     const configuredApi = resolveListingApi(ctx.config.listingApi);
     let listingApi: EightfoldListingApi = configuredApi === 'pcsx' ? 'pcsx' : 'apply-v2';
 
@@ -356,12 +372,14 @@ export class EightfoldAdapter implements ScraperAdapter {
       if (rawCount === 0) break;
 
       let added = 0;
+      let unseen = 0;
       for (const position of batch) {
-        const id = String(position.id ?? position.display_job_id ?? position.ats_job_id ?? '');
+        const id = eightfoldId(position);
         if (!id || seenIds.has(id)) continue;
         seenIds.add(id);
         positions.push(position);
         added += 1;
+        if (!canSkipDetail(ctx, id)) unseen += 1;
       }
 
       ctx.logger.info('eightfold: page done', {
@@ -369,10 +387,24 @@ export class EightfoldAdapter implements ScraperAdapter {
         api: listingApi,
         collected: positions.length,
         reportedCount: count,
+        unseen,
       });
 
       if (added === 0) break;
       if (positions.length >= maxJobs) break;
+
+      // Incremental stop-on-known. This is what makes an incremental run cheap in
+      // requests as well as in rows: `capped` is what the detail stage walks, so
+      // ending the listing after one page takes HSBC from 400 detail fetches down to
+      // a single page's worth. A full crawl carries no known-id set, so `isIncremental`
+      // is false and this never fires.
+      if (isIncremental(ctx) && stopOnKnown && unseen === 0) {
+        ctx.logger.info('eightfold: stopping early — page held nothing new', {
+          page: pageNumber + 1,
+          collected: positions.length,
+        });
+        break;
+      }
 
       // Advance by what actually came back, not by the requested `num`: the
       // server is free to cap the page size (PCSX caps it at 10 and ignores `num`
@@ -486,7 +518,7 @@ export class EightfoldAdapter implements ScraperAdapter {
     const jobs: RawJob[] = [];
 
     for (const position of capped) {
-      const id = String(position.id ?? position.display_job_id ?? position.ats_job_id ?? '');
+      const id = eightfoldId(position);
       if (!id) continue;
       const detail = details.get(id) ?? position;
 

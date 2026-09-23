@@ -18,7 +18,18 @@ import re
 import sys
 from pathlib import Path
 
-from pglast import parse_sql
+try:
+    from pglast import parse_sql
+except ImportError:  # pragma: no cover - environment problem, not a migration problem
+    # A bare traceback here reads as "the migrations are broken", when the actual
+    # problem is a missing dependency. Say which one and how to get it.
+    print(
+        "check-sql needs pglast, which is not installed for this interpreter.\n"
+        f"  interpreter: {sys.executable}\n"
+        "  fix:         python -m pip install -r supabase/scripts/requirements.txt\n",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS = sorted((ROOT / "supabase" / "migrations").glob("*.sql"))

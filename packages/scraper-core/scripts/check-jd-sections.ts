@@ -123,6 +123,53 @@ check(
   true,
 );
 
+// ── list headings, unmarked lists, and page furniture ────────────────────────
+//
+// The real shape from Cathay Pacific, whose adapter flattens HTML to text and loses
+// the `<li>` markers. The items arrive one per line with nothing to mark them as a
+// list, so the heading is the only signal that they are one — without this they
+// render as a stack of one-line paragraphs, which does not look like a job posting.
+const cathay = buildJdSections({
+  description: [
+    'Application deadline: 02 Oct 2026',
+    'Role Introduction',
+    'Drive the evolution of distribution capabilities.',
+    'Partnering closely with project teams, you will gather requirements.',
+    'Key Responsibilities',
+    'Drive continuous improvement initiatives.',
+    'Collaborate with project teams to gather requirements.',
+    'Requirements',
+    "Bachelor's Degree with at least 5 years of experience.",
+    'Good data analysis and numerical skills.',
+  ].join('\n'),
+});
+check('cathay: "Role Introduction" is recognised as a heading', cathay[0]?.heading, 'Role Introduction');
+check(
+  'cathay: the deadline line is dropped as page furniture',
+  JSON.stringify(cathay).includes('Application deadline'),
+  false,
+);
+check(
+  'cathay: prose under an intro heading stays prose',
+  cathay[0]?.blocks.every((b) => b.kind === 'paragraph'),
+  true,
+);
+check('cathay: an unmarked list under "Key Responsibilities" becomes bullets', cathay[1]?.blocks, [
+  {
+    kind: 'bullets',
+    items: [
+      'Drive continuous improvement initiatives.',
+      'Collaborate with project teams to gather requirements.',
+    ],
+  },
+]);
+check('cathay: "Requirements" likewise', cathay[2]?.blocks[0]?.kind, 'bullets');
+check(
+  'cathay: the list items are kept, not merged',
+  cathay[2]?.blocks[0]?.kind === 'bullets' ? cathay[2]!.blocks[0]!.items.length : 0,
+  2,
+);
+
 // ── bounds and degenerate input ──────────────────────────────────────────────
 
 check('empty input yields nothing', buildJdSections({}), []);

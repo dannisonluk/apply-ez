@@ -220,7 +220,23 @@ const BULLET_PREFIX = /^(?:[-*•·◦▪‣–—]\s+|\d+[\.\)]\s+|[A-Za-z]\)\s
  * changing behaviour other callers depend on.
  */
 const JD_HEADING_WORDS =
-  /^(?:about(?: the)?(?: role| job| team| company| us)?|job (?:summary|description|overview)|summary|overview|description|key responsibilities|responsibilities|duties|the role|your role|what you(?:\u2019|')?ll do|what you will do|what we(?:\u2019|')?re looking for|what we are looking for|requirements|qualifications|the person|about you|your (?:profile|background)|skills|experience|benefits|what we offer|we offer)$/i;
+  /^(?:about(?: the)?(?: role| job| team| company| us)?|role introduction|introduction|job (?:summary|description|overview)|summary|overview|description|key responsibilities|responsibilities|duties|the role|your role|what you(?:\u2019|')?ll do|what you will do|what we(?:\u2019|')?re looking for|what we are looking for|requirements|qualifications|the person|about you|your (?:profile|background)|skills|experience|benefits|what we offer|we offer)$/i;
+
+/**
+ * Headings whose body is a list.
+ *
+ * Postings usually mark list items with `•` or `-`, but not always: when the adapter
+ * has flattened HTML to text the `<li>` markers are gone, leaving one item per line
+ * with nothing to distinguish them from prose. Under one of these headings a run of
+ * lines IS the list — that is what the heading means — so they are emitted as bullets
+ * rather than as a stack of one-line paragraphs, which is how they would otherwise
+ * render and does not look like a job description.
+ */
+const JD_LIST_HEADINGS =
+  /^(?:key )?(?:responsibilities|duties|requirements|qualifications|skills|experience|what you(?:\u2019|')?ll (?:do|bring)|what we(?:\u2019|')?re looking for|your (?:profile|background)|the person|about you|benefits|what we offer|we offer)$/i;
+
+/** Lines that are page furniture, not description. */
+const JD_NOISE_LINE = /^(?:application deadline|closing date|job ref(?:erence)?|req(?:uisition)? id|apply now|share this job)\b/i;
 
 const NAMED_SECTIONS: Array<{ key: string; heading: string }> = [
   { key: 'roleIntroduction', heading: 'About the role' },
@@ -287,21 +303,31 @@ function splitBlobSections(text: string): JobJdSection[] {
     return section;
   };
 
+  // Set when the open section's heading means "the lines below are a list".
+  let currentIsList = false;
+
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i]!;
     const next = lines[i + 1];
     const bullet = isBulletLine(line);
 
     if (!bullet && looksLikeJdHeading(line, next ? isBulletLine(next) : false)) {
-      current = open(stripHeadingColon(line));
+      const heading = stripHeadingColon(line);
+      current = open(heading);
+      currentIsList = JD_LIST_HEADINGS.test(heading);
       continue;
     }
 
-    if (!current) current = open(null);
+    if (JD_NOISE_LINE.test(line)) continue;
+
+    if (!current) {
+      current = open(null);
+      currentIsList = false;
+    }
     const body = line.replace(BULLET_PREFIX, '').trim();
     if (!body) continue;
 
-    if (bullet) {
+    if (bullet || currentIsList) {
       const last = current.blocks[current.blocks.length - 1];
       if (last && last.kind === 'bullets') last.items.push(body);
       else current.blocks.push({ kind: 'bullets', items: [body] });

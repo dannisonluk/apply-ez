@@ -158,6 +158,12 @@ export const SCRAPE_TARGETS: ScrapeTarget[] = [
       maxJobs: 500,
       includeDetailPages: true,
       maxDetailJobs: 400,
+      // Verified against the live listing: HSBC returns two pinned postings above an
+      // otherwise strictly descending run of dates (2026-09-22, 09-21, 09-18, ...).
+      // The pinned pair sits on page 0, which is also where a new posting appears, so
+      // a page holding nothing unseen still means the frontier has been reached.
+      // Stopping there takes the detail stage from 400 fetches to one page's worth.
+      incrementalStopOnKnown: true,
       reconcileMissingJobs: true,
     },
     enabled: true,

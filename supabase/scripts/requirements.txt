@@ -1,0 +1,9 @@
+# Dependencies for supabase/scripts/check-sql.py.
+#
+#   python -m pip install -r supabase/scripts/requirements.txt
+#   pnpm check:sql
+#
+# pglast wraps libpg_query — the real PostgreSQL parser — so the migrations are
+# checked against actual grammar rather than a regular expression. It ships
+# prebuilt wheels for Linux, macOS and Windows, so no compiler is needed.
+pglast>=7

@@ -1,8 +1,8 @@
 {
   "expo": {
     "name": "apply-ez",
-    "slug": "apply-ez",
-    "owner": "dannisonluk",
+    "slug": "applyez",
+    "owner": "dannison_luk",
     "version": "0.1.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -35,6 +35,11 @@
     "plugins": ["expo-router", "expo-notifications"],
     "experiments": {
       "typedRoutes": true
+    },
+    "extra": {
+      "eas": {
+        "projectId": "df0229cc-7f42-4f5e-9138-38fb0c5f3ff0"
+      }
     }
   }
 }

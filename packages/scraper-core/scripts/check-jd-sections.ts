@@ -170,6 +170,56 @@ check(
   2,
 );
 
+// ── multi-word list headings ─────────────────────────────────────────────────
+//
+// The real AIA shape (Workday). Its headings are not the bare "Requirements" a strict
+// allow-list would expect — they are "Roles and Responsibilities" and "Minimum Job
+// Requirements". Matching the whole heading against a fixed list produced zero
+// bullets on every Workday posting, which is why the rule matches the keyword
+// anywhere in the heading instead.
+const aia = buildJdSections({
+  description: [
+    'About the Role',
+    'You will join the actuarial team.',
+    'Roles and Responsibilities',
+    'Support the valuation of reserves.',
+    'Prepare monthly reporting packs.',
+    'Minimum Job Requirements',
+    'Degree in actuarial science.',
+    'Progress towards a professional qualification.',
+  ].join('\n'),
+});
+check('aia: "About the Role" is a heading', aia[0]?.heading, 'About the Role');
+check('aia: "Roles and Responsibilities" is a heading', aia[1]?.heading, 'Roles and Responsibilities');
+check('aia: its items become bullets', aia[1]?.blocks[0]?.kind, 'bullets');
+check(
+  'aia: both items are kept',
+  aia[1]?.blocks[0]?.kind === 'bullets' ? aia[1]!.blocks[0]!.items.length : 0,
+  2,
+);
+check('aia: "Minimum Job Requirements" is a list too', aia[2]?.blocks[0]?.kind, 'bullets');
+check('aia: prose under "About the Role" stays prose', aia[0]?.blocks[0]?.kind, 'paragraph');
+
+// The guard that makes the keyword rule safe: a prose sentence that merely contains
+// one of the keywords must stay prose. Without the length and terminal-punctuation
+// checks, relaxing the allow-list would turn sentences into headings.
+const sentenceWithKeyword = buildJdSections({
+  description: [
+    'You will support the responsibilities of the team.',
+    'You will own the requirements for the project.',
+  ].join('\n'),
+});
+check(
+  'keyword guard: sentences containing keywords stay prose',
+  sentenceWithKeyword.length === 1 && sentenceWithKeyword[0]?.heading === null,
+  true,
+);
+check(
+  'keyword guard: both lines are paragraphs, not bullets',
+  sentenceWithKeyword[0]?.blocks.every((b) => b.kind === 'paragraph'),
+  true,
+);
+
 // ── bounds and degenerate input ──────────────────────────────────────────────
 
 check('empty input yields nothing', buildJdSections({}), []);

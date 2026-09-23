@@ -219,7 +219,7 @@ const BULLET_PREFIX = /^(?:[-*•·◦▪‣–—]\s+|\d+[\.\)]\s+|[A-Za-z]\)\s
  * heading glued onto body text, so this path does its own detection rather than
  * changing behaviour other callers depend on.
  */
-const JD_HEADING_WORDS =
+const JD_HEADING_LABELS =
   /^(?:about(?: the)?(?: role| job| team| company| us)?|role introduction|introduction|job (?:summary|description|overview)|summary|overview|description|key responsibilities|responsibilities|duties|the role|your role|what you(?:\u2019|')?ll do|what you will do|what we(?:\u2019|')?re looking for|what we are looking for|requirements|qualifications|the person|about you|your (?:profile|background)|skills|experience|benefits|what we offer|we offer)$/i;
 
 /**
@@ -233,7 +233,7 @@ const JD_HEADING_WORDS =
  * render and does not look like a job description.
  */
 const JD_LIST_HEADINGS =
-  /^(?:key )?(?:responsibilities|duties|requirements|qualifications|skills|experience|what you(?:\u2019|')?ll (?:do|bring)|what we(?:\u2019|')?re looking for|your (?:profile|background)|the person|about you|benefits|what we offer|we offer)$/i;
+  /\b(?:responsibilities|duties|requirements|qualifications|skills|competencies|benefits)\b/i;
 
 /** Lines that are page furniture, not description. */
 const JD_NOISE_LINE = /^(?:application deadline|closing date|job ref(?:erence)?|req(?:uisition)? id|apply now|share this job)\b/i;
@@ -252,12 +252,31 @@ function isBulletLine(value: string): boolean {
   return BULLET_PREFIX.test(value);
 }
 
+/**
+ * Section vocabulary, matched anywhere in a heading rather than as a whole heading.
+ *
+ * An exact-label allow-list cannot cover real headings. AIA writes "Roles and
+ * Responsibilities" and "Minimum Job Requirements", neither of which is one of the
+ * bare labels, so the allow-list alone produced ZERO headings on every Workday
+ * posting and everything collapsed into one untitled section.
+ *
+ * A keyword on its own would be too eager — "You will support the responsibilities of
+ * the team." contains one and is a sentence — so the length and terminal-punctuation
+ * guards inside `looksLikeJdHeading` still apply. Together they separate a label from
+ * a sentence that happens to use the same noun.
+ */
+const JD_HEADING_KEYWORDS =
+  /\b(?:responsibilities|duties|requirements|qualifications|skills|competencies|benefits|summary|overview|introduction|profile|background)\b/i;
+
 function looksLikeJdHeading(line: string, nextIsBullet: boolean): boolean {
   const bare = stripHeadingColon(line);
   if (!bare || bare.length > 60) return false;
   // A sentence is not a heading, however short.
   if (/[.。!?！？,，;；]$/.test(bare)) return false;
-  if (JD_HEADING_WORDS.test(bare)) return true;
+  if (JD_HEADING_LABELS.test(bare)) return true;
+  // A keyword only marks a heading in a label-sized line, which is what keeps a
+  // prose sentence containing the same noun out.
+  if (JD_HEADING_KEYWORDS.test(bare) && bare.split(/\s+/).length <= 6) return true;
   // "The team:" — an explicit colon is the author telling us it is a label.
   if (/[:：]\s*$/.test(line)) return true;
   // A short line directly above bullets is introducing them.

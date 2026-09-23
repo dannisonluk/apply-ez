@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useNavigation } from 'expo-router';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Linking,
@@ -50,45 +50,61 @@ export default function JobDetailScreen(): React.JSX.Element {
   // it was reached by tapping a card. A notification tap or a cold deep link has
   // nothing in memory, so fall back to a single-row fetch.
   const [fetched, setFetched] = useState<JobView | null>(null);
-  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const fromList = useMemo(() => jobs.find((job) => job.id === id) ?? null, [jobs, id]);
+  // Read inside the effect without making the effect depend on the list, which would
+  // re-fetch every time the board refreshes.
+  const fromListRef = useRef(fromList);
+  fromListRef.current = fromList;
 
+  /**
+   * Always fetch the single row, even when the list already has it.
+   *
+   * The list query deliberately omits `jd_sections` — it is the largest column on the
+   * table and the list never renders it — so a screen painted from a list row has no
+   * job description at all. The earlier version returned early whenever `fromList`
+   * existed, which meant the detail page could never show a JD for any job reached by
+   * tapping a card: that is, almost always.
+   *
+   * Painting from the list row first and swapping in the fetched row keeps the screen
+   * instant without giving up the fuller data.
+   */
   useEffect(() => {
-    if (fromList || !id) return;
+    if (!id) return;
     let cancelled = false;
 
     void (async () => {
-      setLoading(true);
       try {
         const row = await fetchJob(id);
         if (cancelled) return;
-        if (!row) {
-          setError('This job is no longer available.');
-        } else {
+        if (row) {
           setFetched(toJobView(row, null));
+        } else if (!fromListRef.current) {
+          // Only a dead end when the list does not have it either.
+          setError('This job is no longer available.');
         }
       } catch (caught) {
         if (!cancelled) setError(caught instanceof Error ? caught.message : String(caught));
-      } finally {
-        if (!cancelled) setLoading(false);
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [fromList, id]);
+  }, [id]);
 
-  const job = fromList ?? fetched;
+  // The fetched row wins once it lands: it is a superset of the list row.
+  const job = fetched ?? fromList;
 
   // Put the real title in the native header once it is known.
   useEffect(() => {
     if (job) navigation.setOptions({ title: job.companyName });
   }, [job, navigation]);
 
-  if (loading) return <Spinner label="Loading job…" />;
+  // Nothing to show yet and no error: a fetch is still in flight. This replaces a
+  // `loading` flag, which could not tell a cold deep link from a tap on a card.
+  if (!job && !error) return <Spinner label="Loading job…" />;
 
   if (!job) {
     return (

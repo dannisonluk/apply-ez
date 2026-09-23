@@ -191,3 +191,178 @@ export function parseSectionBlocks(value: unknown): SectionBlock[] {
   flushLoose();
   return blocks;
 }
+
+// ─── Stored JD shape ─────────────────────────────────────────────────────────
+
+/**
+ * One titled section of a job description, ready to render as a heading followed by
+ * its blocks. `heading` is null for opening prose that has no title of its own.
+ */
+export interface JobJdSection {
+  heading: string | null;
+  blocks: SectionBlock[];
+}
+
+/** Bounds. A JD is read on a phone; past this it stops being a description. */
+const JD_MAX_SECTIONS = 8;
+const JD_MAX_ITEMS_PER_BLOCK = 24;
+const JD_MAX_ITEM_CHARS = 400;
+
+const BULLET_PREFIX = /^(?:[-*•·◦▪‣–—]\s+|\d+[\.\)]\s+|[A-Za-z]\)\s+)/;
+
+/**
+ * Headings that appear on their own line in a posting body.
+ *
+ * Needed because `parseSectionBlocks` cannot see them: its `stripHeadingPrefix`
+ * deletes a line that is exactly "Requirements:" or "Key responsibilities:", which
+ * is precisely the shape most postings use. That function exists to clean up a
+ * heading glued onto body text, so this path does its own detection rather than
+ * changing behaviour other callers depend on.
+ */
+const JD_HEADING_WORDS =
+  /^(?:about(?: the)?(?: role| job| team| company| us)?|job (?:summary|description|overview)|summary|overview|description|key responsibilities|responsibilities|duties|the role|your role|what you(?:\u2019|')?ll do|what you will do|what we(?:\u2019|')?re looking for|what we are looking for|requirements|qualifications|the person|about you|your (?:profile|background)|skills|experience|benefits|what we offer|we offer)$/i;
+
+const NAMED_SECTIONS: Array<{ key: string; heading: string }> = [
+  { key: 'roleIntroduction', heading: 'About the role' },
+  { key: 'keyResponsibilities', heading: 'Key responsibilities' },
+  { key: 'requirements', heading: 'Requirements' },
+];
+
+function stripHeadingColon(value: string): string {
+  return value.replace(/[:：]\s*$/, '').trim();
+}
+
+function isBulletLine(value: string): boolean {
+  return BULLET_PREFIX.test(value);
+}
+
+function looksLikeJdHeading(line: string, nextIsBullet: boolean): boolean {
+  const bare = stripHeadingColon(line);
+  if (!bare || bare.length > 60) return false;
+  // A sentence is not a heading, however short.
+  if (/[.。!?！？,，;；]$/.test(bare)) return false;
+  if (JD_HEADING_WORDS.test(bare)) return true;
+  // "The team:" — an explicit colon is the author telling us it is a label.
+  if (/[:：]\s*$/.test(line)) return true;
+  // A short line directly above bullets is introducing them.
+  return nextIsBullet && bare.split(/\s+/).length <= 6;
+}
+
+function clampText(value: string): string {
+  return value.slice(0, JD_MAX_ITEM_CHARS).trim();
+}
+
+function clampBlock(block: SectionBlock): SectionBlock | null {
+  if (block.kind === 'paragraph') {
+    const text = clampText(block.text);
+    return text ? { kind: 'paragraph', text } : null;
+  }
+  const items = block.items.map(clampText).filter(Boolean).slice(0, JD_MAX_ITEMS_PER_BLOCK);
+  if (items.length === 0) return null;
+  // Built per kind rather than spread from `block`, so the result is checked rather
+  // than cast — a cast would happily let a group lose its heading.
+  return block.kind === 'group'
+    ? { kind: 'group', heading: block.heading, items }
+    : { kind: 'bullets', items };
+}
+
+function isBlock(block: SectionBlock | null): block is SectionBlock {
+  return block !== null;
+}
+
+/** Split a posting body into titled sections, keeping bullet runs together. */
+function splitBlobSections(text: string): JobJdSection[] {
+  const lines = text
+    .replace(/\r/g, '\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const sections: JobJdSection[] = [];
+  let current: JobJdSection | null = null;
+
+  const open = (heading: string | null): JobJdSection => {
+    const section: JobJdSection = { heading, blocks: [] };
+    sections.push(section);
+    return section;
+  };
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]!;
+    const next = lines[i + 1];
+    const bullet = isBulletLine(line);
+
+    if (!bullet && looksLikeJdHeading(line, next ? isBulletLine(next) : false)) {
+      current = open(stripHeadingColon(line));
+      continue;
+    }
+
+    if (!current) current = open(null);
+    const body = line.replace(BULLET_PREFIX, '').trim();
+    if (!body) continue;
+
+    if (bullet) {
+      const last = current.blocks[current.blocks.length - 1];
+      if (last && last.kind === 'bullets') last.items.push(body);
+      else current.blocks.push({ kind: 'bullets', items: [body] });
+    } else {
+      current.blocks.push({ kind: 'paragraph', text: body });
+    }
+  }
+
+  return sections;
+}
+
+/**
+ * Build the sections stored on the job and rendered on the detail page.
+ *
+ * Two shapes arrive from the adapters and both have to end up the same:
+ *
+ *  - `sectionContent`, a named object (`roleIntroduction` / `keyResponsibilities` /
+ *    `requirements`) that the corporate-careers and Cathay adapters produce. Already
+ *    titled, so it needs no heading detection — only bullet normalisation, which
+ *    `normalizeSectionValue` does, including turning a plain array into a bullet list
+ *    (an array is a list by construction, and reading it as separate paragraphs
+ *    loses that).
+ *  - `description`, a single blob of text, which is what Workday has.
+ *
+ * Pure and deterministic, so it runs on every scrape for free and cannot invent a
+ * requirement the posting does not contain. An LLM could write richer prose, but the
+ * detail page needs the employer's own wording, not a paraphrase of it.
+ */
+export function buildJdSections(input: {
+  sectionContent?: unknown;
+  description?: string | null;
+}): JobJdSection[] {
+  const out: JobJdSection[] = [];
+
+  const content =
+    input.sectionContent && typeof input.sectionContent === 'object'
+      ? (input.sectionContent as Record<string, unknown>)
+      : null;
+
+  if (content) {
+    for (const { key, heading } of NAMED_SECTIONS) {
+      const value = content[key];
+      if (value === null || value === undefined) continue;
+      const normalized = normalizeSectionValue(value);
+      const blocks: SectionBlock[] = [];
+      if (normalized.bullets.length > 0) {
+        blocks.push({ kind: 'bullets', items: normalized.bullets });
+      } else if (normalized.paragraph) {
+        blocks.push({ kind: 'paragraph', text: normalized.paragraph });
+      }
+      const clamped = blocks.map(clampBlock).filter(isBlock);
+      if (clamped.length > 0) out.push({ heading, blocks: clamped });
+    }
+  }
+
+  if (out.length === 0 && typeof input.description === 'string' && input.description.trim()) {
+    for (const section of splitBlobSections(input.description)) {
+      const blocks = section.blocks.map(clampBlock).filter(isBlock).slice(0, JD_MAX_ITEMS_PER_BLOCK);
+      if (blocks.length > 0) out.push({ heading: section.heading, blocks });
+    }
+  }
+
+  return out.filter((section) => section.blocks.length > 0).slice(0, JD_MAX_SECTIONS);
+}

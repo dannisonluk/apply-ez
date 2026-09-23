@@ -55,6 +55,8 @@ supabase/migrations/0003_relevance_applications_codes.sql
     app_unlock / record_application / list_applications / set_app_codes
 supabase/migrations/0004_dedupe_includes_company.sql
     job uniqueness becomes (company_id, source, external_id)
+supabase/migrations/0005_jd_sections.sql
+    jd_sections — the posting body as titled sections for the detail page
 ```
 
 **0004 must be applied before the scraper code that depends on it is deployed.**
@@ -289,6 +291,42 @@ than destructive.
 Measured effect: a full run re-scrapes 736 postings, 588 of which are already stored,
 and issues roughly 1,000 detail requests. An incremental run stops at the first page
 with nothing new, so the work is proportional to what actually changed.
+
+## Job descriptions
+
+The detail page shows the posting the way a job board does — titled sections with
+bullets underneath — rather than only a paragraph of summary. `jd_sections` holds it,
+built at ingest by `buildJdSections` in `types/section-content.ts`.
+
+Two shapes arrive from the adapters and both have to end up the same:
+
+- `sectionContent`, a named object (`roleIntroduction` / `keyResponsibilities` /
+  `requirements`), which is what the corporate-careers and Cathay adapters produce.
+  Already titled, so it needs no heading detection — but an **array of strings is a
+  bullet list**, and emitting one paragraph per string loses that.
+- `description`, a single blob, which is what Workday has. Its headings have to be
+  recovered from the text.
+
+The blob path does its own heading detection rather than reusing
+`parseSectionBlocks`, and that is not duplication for its own sake.
+`parseSectionBlocks` runs `stripHeadingPrefix`, which **deletes a line that is exactly
+"Requirements:" or "Key responsibilities:"** — it exists to clean up a heading glued
+onto body text, and it cannot tell that apart from a standalone heading. Those two
+strings are the most common headings in the corpus, so the shared parser silently
+collapses a typical posting into one untitled section. A dedicated splitter keeps the
+existing behaviour intact for its other callers.
+
+The raw `description` is deliberately not stored. It is the largest field a posting
+has and nothing reads it once parsed, so keeping both would roughly double the table.
+
+Existing rows stay empty until a crawl refetches their detail pages — the JD is only
+available at scrape time and is not recoverable from what is already stored.
+
+`fetchJob` selects `jd_sections`; the list query does not. Pulling it for ~740 rows
+would add megabytes to a refresh that runs every six hours, for a column the list
+never renders. It also degrades rather than breaks: if migration 0005 has not been
+applied, Postgres answers 42703 and the detail page would otherwise fail completely
+over one optional column, so the query retries without it.
 
 ## Hong Kong scope
 
@@ -635,11 +673,12 @@ Two things generalise from this:
 Run the regression checks:
 
 ```bash
-pnpm --filter @apply-ez/scraper-core check           # all eleven suites, 727 assertions
+pnpm --filter @apply-ez/scraper-core check           # all twelve suites, 748 assertions
 pnpm --filter @apply-ez/scraper-core check:backfill  # 40
 pnpm --filter @apply-ez/scraper-core check:hk-time   # 51
 pnpm --filter @apply-ez/scraper-core check:location  # 35
 pnpm --filter @apply-ez/scraper-core check:relevance # 205
+pnpm --filter @apply-ez/scraper-core check:jd-sections # 21
 pnpm --filter @apply-ez/scraper-core check:llm       # 91
 pnpm --filter @apply-ez/scraper-core check:push      # 33
 pnpm --filter @apply-ez/scraper-core check:store     # 19

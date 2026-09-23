@@ -7,6 +7,7 @@ import {
 } from '../types/index.js';
 import { parseHongKongDateTime } from './hk-time.js';
 import { isOutOfScopeLocation } from './location-scope.js';
+import { buildJdSections } from '../types/section-content.js';
 
 /**
  * Normalizes raw adapter output before it reaches API validation.
@@ -272,6 +273,15 @@ function normalizeSingleJob(input: Record<string, unknown>): JobIngest | null {
 
   const externalId = truncate(asTrimmed(input.externalId), 500) ?? fallbackExternalId(source, url, title);
 
+  // The posting body, split into titled sections. Built here because this is the one
+  // place both shapes meet: adapters emit either a named `sectionContent` object
+  // (corporate-careers, Cathay) or a single `description` blob (Workday), and the
+  // detail page should not have to care which.
+  const jdSections = buildJdSections({
+    sectionContent: input.sectionContent,
+    description: typeof input.description === 'string' ? input.description : null,
+  });
+
   return {
     source,
     externalId,
@@ -296,6 +306,7 @@ function normalizeSingleJob(input: Record<string, unknown>): JobIngest | null {
     ...(classification ? { classification } : {}),
     publishedAt: normalizeDateTime(input.publishedAt),
     ...(topMetadata ? { topMetadata } : {}),
+    ...(jdSections.length > 0 ? { jdSections } : {}),
   };
 }
 

@@ -28,7 +28,7 @@ import { useJobs } from '../../src/state/jobs';
 import { useSession } from '../../src/state/session';
 import { palettes, useTheme, type Theme } from '../../src/theme';
 import { RESUME_SLOT_LABELS, type ResumeSlot } from '../../src/lib/storage';
-import { toJobView, type JobView } from '../../src/types';
+import { toJobView, type JdBlock, type JobView } from '../../src/types';
 
 /** Shaped as `{key, label}` pairs so the chips and the lookup agree by construction. */
 const RESUME_SLOTS = (
@@ -183,6 +183,26 @@ export default function JobDetailScreen(): React.JSX.Element {
               </Text>
             </View>
             <Text style={s.summaryText}>{job.summary}</Text>
+          </Card>
+        </Section>
+      ) : null}
+
+      {/* The posting's own words, in its own structure. Placed after the summary
+          because the summary is the scannable version and this is the reference —
+          the order a reader wants them, not the order they arrive in. */}
+      {job.jdSections.length > 0 ? (
+        <Section title="Job description">
+          <Card>
+            <View style={s.jdRoot}>
+              {job.jdSections.map((section, sectionIndex) => (
+                <View key={sectionIndex} style={s.jdSection}>
+                  {section.heading ? <Text style={s.jdHeading}>{section.heading}</Text> : null}
+                  {section.blocks.map((block, blockIndex) => (
+                    <JdBlockView key={blockIndex} block={block} />
+                  ))}
+                </View>
+              ))}
+            </View>
           </Card>
         </Section>
       ) : null}
@@ -376,6 +396,34 @@ export default function JobDetailScreen(): React.JSX.Element {
 }
 
 /** The confirmation panel. Two gates: unlock the area, then the per-submit code. */
+/**
+ * One block of the posting body.
+ *
+ * Bullets are drawn as a dot column rather than a `•` prefix inside a single Text,
+ * because the wrapped second line of a long bullet has to stay aligned with the
+ * first — with a prefix it would hang back under the dot.
+ */
+function JdBlockView({ block }: { block: JdBlock }): React.JSX.Element {
+  const theme = useTheme();
+  const s = styles[theme.scheme];
+
+  if (block.kind === 'paragraph') {
+    return <Text style={s.jdParagraph}>{block.text}</Text>;
+  }
+
+  return (
+    <View style={s.jdBulletGroup}>
+      {block.kind === 'group' ? <Text style={s.jdGroupHeading}>{block.heading}</Text> : null}
+      {block.items.map((item, index) => (
+        <View key={index} style={s.jdBulletRow}>
+          <Text style={s.jdBulletDot}>•</Text>
+          <Text style={s.jdBulletText}>{item}</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
 function ApplyRecorder({
   unlocked,
   alreadyApplied,
@@ -610,6 +658,47 @@ const makeStyles = (theme: Theme) =>
       fontWeight: '600',
     },
     summaryText: {
+      fontSize: theme.font.body,
+      color: theme.color.text,
+      lineHeight: 22,
+    },
+    jdRoot: {
+      gap: theme.space(4),
+    },
+    jdSection: {
+      gap: theme.space(2),
+    },
+    jdHeading: {
+      fontSize: theme.font.label,
+      fontWeight: '700',
+      color: theme.color.text,
+    },
+    jdParagraph: {
+      fontSize: theme.font.body,
+      color: theme.color.text,
+      lineHeight: 22,
+    },
+    jdBulletGroup: {
+      gap: theme.space(1.5),
+    },
+    jdGroupHeading: {
+      fontSize: theme.font.caption,
+      fontWeight: '700',
+      color: theme.color.textMuted,
+      marginTop: theme.space(1),
+    },
+    jdBulletRow: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: theme.space(2),
+    },
+    jdBulletDot: {
+      fontSize: theme.font.body,
+      color: theme.color.primary,
+      lineHeight: 22,
+    },
+    jdBulletText: {
+      flex: 1,
       fontSize: theme.font.body,
       color: theme.color.text,
       lineHeight: 22,

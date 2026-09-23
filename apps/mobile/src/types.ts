@@ -47,6 +47,23 @@ export interface JobClassification {
   signals?: string[];
 }
 
+// ─── job description ─────────────────────────────────────────────────────────
+
+/** One block inside a JD section. Mirrors `jobJdBlockSchema` in scraper-core. */
+export type JdBlock =
+  | { kind: 'paragraph'; text: string }
+  | { kind: 'bullets'; items: string[] }
+  | { kind: 'group'; heading: string; items: string[] };
+
+/**
+ * A titled section of the posting body. `heading` is null for the opening prose,
+ * which most postings run before their first label.
+ */
+export interface JobJdSection {
+  heading: string | null;
+  blocks: JdBlock[];
+}
+
 export interface CompanyRef {
   name: string;
   slug: string;
@@ -92,6 +109,8 @@ export interface JobRow {
   summary: string | null;
   summary_lang: string | null;
   extracted: JobExtracted | null;
+  /** Posting body as titled sections. `[]` until a crawl refetches the detail. */
+  jd_sections: JobJdSection[] | null;
   enrich_status: 'PENDING' | 'OK' | 'FAILED' | 'SKIPPED';
   enrich_model: string | null;
   enriched_at: string | null;
@@ -151,6 +170,8 @@ export interface JobView {
   workSchedule: string | null;
   summary: string | null;
   summaryLang: string | null;
+  /** The posting body as titled sections, ready to render. Empty when unavailable. */
+  jdSections: JobJdSection[];
   skills: string[];
   responsibilities: string[];
   flags: string[];
@@ -227,6 +248,10 @@ export function toJobView(
     workSchedule: row.work_schedule,
     summary: row.summary,
     summaryLang: row.summary_lang,
+    // Rows written before migration 0005 have no value here, and a cached payload
+    // from an older schema may not even carry the key — normalise both to `[]` so
+    // the detail page has one shape to render.
+    jdSections: Array.isArray(row.jd_sections) ? row.jd_sections : [],
     skills: extracted.skills ?? [],
     responsibilities: extracted.responsibilities ?? [],
     flags: extracted.flags ?? [],

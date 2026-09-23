@@ -294,6 +294,10 @@ export class JobStore {
         relevance_score: job.relevanceScore ?? 50,
         role_family: job.roleFamily ?? null,
         filter_reason: job.filterReason ?? null,
+        // The posting body as titled sections, for the detail page. An empty array
+        // rather than null, so the app has exactly one shape to render and does not
+        // have to distinguish "no JD" from "not fetched yet".
+        jd_sections: job.jdSections ?? [],
         published_at: job.publishedAt,
         last_seen_at: new Date().toISOString(),
         // Reappearing jobs come back to ACTIVE; EXPIRED is only set by reconcile.

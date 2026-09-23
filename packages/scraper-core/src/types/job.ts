@@ -102,6 +102,29 @@ export const jobSectionContentSchema = z.object({
 export type JobSectionContent = z.infer<typeof jobSectionContentSchema>;
 
 /**
+ * The posting body as titled sections, for the job detail page.
+ *
+ * Stored rather than derived on read, because the raw description is deliberately
+ * not kept — it is by far the largest field a posting has, and the app only ever
+ * renders the parsed form.
+ */
+export const jobJdBlockSchema = z.union([
+  z.object({ kind: z.literal('bullets'), items: z.array(z.string()).min(1).max(24) }),
+  z.object({
+    kind: z.literal('group'),
+    heading: z.string(),
+    items: z.array(z.string()).min(1).max(24),
+  }),
+  z.object({ kind: z.literal('paragraph'), text: z.string() }),
+]);
+
+export const jobJdSectionSchema = z.object({
+  heading: z.string().nullable(),
+  blocks: z.array(jobJdBlockSchema).min(1).max(24),
+});
+export type JobJdSectionShape = z.infer<typeof jobJdSectionSchema>;
+
+/**
  * Source-specific metadata that is not reliable enough for first-class columns.
  * Frequently queried fields are promoted to Job columns while this object
  * preserves the original scraper context.
@@ -161,6 +184,16 @@ export const jobIngestSchema = z.object({
   filterReason: z.string().max(200).optional(),
   publishedAt: z.string().datetime(),
   topMetadata: jobTopMetadataSchema.optional(),
+  /**
+   * The posting body as titled sections, built by `buildJdSections` from whatever
+   * the adapter had — a named `sectionContent` object or a single `description` blob.
+   *
+   * `.catch([])` is load-bearing, not decoration. `prepareJobsForIngest` DROPS a job
+   * whose schema parse fails, so a strict field here would silently delete postings
+   * over a malformed job description. A section that will not validate has to degrade
+   * to "no JD shown", never to "job missing".
+   */
+  jdSections: z.array(jobJdSectionSchema).max(8).catch([]).optional(),
 });
 export type JobIngest = z.infer<typeof jobIngestSchema>;
 

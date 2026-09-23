@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "844911607009",
+    "project_id": "apply-ez",
+    "storage_bucket": "apply-ez.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:844911607009:android:e5a442a097ba5507adcba0",
+        "android_client_info": {
+          "package_name": "com.dannisonluk.applyez"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD9QXZWAYZraqXc18yP8pfcEpZRJw4tqBE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

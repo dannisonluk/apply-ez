@@ -181,11 +181,39 @@ export async function fetchJobs(limit = MAX_ROWS_PER_STATUS): Promise<JobRow[]> 
   return [...active, ...expired];
 }
 
+/**
+ * The detail query adds `jd_sections`, and the list query deliberately does not.
+ * It is the largest column on the table and the list never renders it, so pulling
+ * it for all ~740 rows would add megabytes to a refresh that runs every six hours.
+ */
+const JOB_DETAIL_SELECT = `${JOB_SELECT},jd_sections`;
+
+/**
+ * True when PostgREST rejected the query because a selected column does not exist.
+ *
+ * Used to survive a database that has not had a migration applied yet. Postgres
+ * answers SQLSTATE 42703, and PostgREST reports it as a 400 with that code in the
+ * body — not as a 5xx, so a naive retry-on-5xx would not catch it.
+ */
+function isUnknownColumnError(error: unknown): boolean {
+  return error instanceof RestError && error.status === 400 && error.body.includes('42703');
+}
+
 export async function fetchJob(id: string): Promise<JobRow | null> {
-  const rows = await rest<JobRow[]>('/jobs', {
-    query: `select=${JOB_SELECT}&id=eq.${encodeURIComponent(id)}&limit=1`,
-  });
-  return rows?.[0] ?? null;
+  const filter = `id=eq.${encodeURIComponent(id)}&limit=1`;
+  try {
+    const rows = await rest<JobRow[]>('/jobs', { query: `select=${JOB_DETAIL_SELECT}&${filter}` });
+    return rows?.[0] ?? null;
+  } catch (error) {
+    // `jd_sections` arrives with migration 0005. If it has not been applied, asking
+    // for it fails the whole query — which would take out the detail page, the most
+    // used screen in the app, over one optional column. Falling back to the list
+    // columns degrades to "no JD shown", which is the correct failure for a missing
+    // optional field.
+    if (!isUnknownColumnError(error)) throw error;
+    const rows = await rest<JobRow[]>('/jobs', { query: `select=${JOB_SELECT}&${filter}` });
+    return rows?.[0] ?? null;
+  }
 }
 
 // ─── application codes + history ─────────────────────────────────────────────

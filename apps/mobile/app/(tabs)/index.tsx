@@ -34,6 +34,9 @@ const FILTERS: Array<{ key: FilterKey; label: string; icon: keyof typeof Ionicon
 
 type SortKey = 'discovered' | 'posted' | 'match';
 
+/** Vertical room the job list keeps for itself when the filter panel is open. */
+const MIN_LIST_HEIGHT = 140;
+
 const SORTS: Array<{ key: SortKey; label: string; icon: keyof typeof Ionicons.glyphMap }> = [
   { key: 'discovered', label: 'Newest', icon: 'sparkles-outline' },
   { key: 'posted', label: 'Posted', icon: 'calendar-outline' },
@@ -112,6 +115,11 @@ export default function JobsScreen(): React.JSX.Element {
   const s = styles[theme.scheme];
   const insets = useSafeAreaInsets();
   const { height: windowHeight } = useWindowDimensions();
+  // Where the panel starts, so the cap can be "what is actually left below it"
+  // rather than a flat fraction of the window. A fraction ignores the header above
+  // it: at 55% of a short viewport the panel still ran off the bottom, because the
+  // header had already eaten half the screen. Null until the first layout.
+  const [panelTop, setPanelTop] = useState<number | null>(null);
   const router = useRouter();
 
   const {
@@ -438,7 +446,11 @@ export default function JobsScreen(): React.JSX.Element {
       </Pressable>
 
       {panelOpen ? (
-        <View testID="filters-panel" style={s.panel}>
+        <View
+          testID="filters-panel"
+          style={s.panel}
+          onLayout={(event) => setPanelTop(event.nativeEvent.layout.y)}
+        >
           {/* The panel renders above the list rather than inside it, so when it grows
               taller than the space left under the header there is nothing to scroll
               it and the last facets fall off the bottom of the screen with no way to
@@ -446,7 +458,15 @@ export default function JobsScreen(): React.JSX.Element {
               filter reachable without turning the whole screen into a scroll view,
               which would break the list's own scrolling and pull-to-refresh. */}
           <ScrollView
-            style={{ maxHeight: Math.round(windowHeight * 0.55) }}
+            style={{
+              maxHeight:
+                panelTop === null
+                  ? Math.round(windowHeight * 0.55)
+                  : Math.max(
+                      180,
+                      Math.round(windowHeight - insets.top - panelTop - MIN_LIST_HEIGHT),
+                    ),
+            }}
             contentContainerStyle={s.panelScrollContent}
             nestedScrollEnabled
             showsVerticalScrollIndicator

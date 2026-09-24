@@ -148,6 +148,55 @@ the ABI list and the native `.so` files all looked correct here.
 about a minute, and `adb logcat -d | grep -A 30 'FATAL EXCEPTION'` gives the answer.
 `/android` is gitignored, so the prebuild does not dirty the tree.
 
+#### Building the APK locally, without the EAS queue
+
+`eas build --local` **does not work on Windows at all** — the CLI refuses with
+`Unsupported platform, macOS or Linux is required`, regardless of whether Docker is
+running, because it checks the host OS rather than the container runtime. And a native
+Windows build cannot work either: React Native's CMake step puts the absolute source
+path inside the object-file path, so the root is counted twice and the longest path for
+`safeareacontext` is **385 characters** against Windows' 260 limit. Even a zero-length
+staging directory leaves it at 280, so shortening the project path does not rescue it
+(`C://apply-ez` still lands at 283).
+
+The way through is a Linux container, where the project is simply `/app`:
+
+```bash
+cd tools/local-android-build
+docker build -t applyez-build:1 .              # node 20 + JDK 17, no SDK
+
+# once: install a LINUX Android SDK into a volume
+docker run --rm -v applyez-android-sdk:/opt/android-sdk \
+  -v "$PWD/setup-sdk.sh:/setup-sdk.sh:ro" applyez-build:1 bash /setup-sdk.sh
+
+# each build
+docker run --rm -v applyez-android-sdk:/opt/android-sdk \
+  -v "<repo>/apps/mobile:/app" -v applyez-gradle:/root/.gradle \
+  -v "$PWD/build-apk.sh:/build-apk.sh:ro" \
+  -e EXPO_PUBLIC_SUPABASE_URL=... -e EXPO_PUBLIC_SUPABASE_ANON_KEY=... \
+  applyez-build:1 bash /build-apk.sh
+```
+
+The APK lands in `apps/mobile/android/app/build/outputs/apk/release/`. A cold build
+takes about 12 minutes; the SDK and Gradle caches live in volumes, so it is paid once.
+
+Three things that cost time to discover:
+
+- **The host Android SDK is unusable.** It is a Windows install, so build-tools holds
+  only `aapt.exe`/`d8.bat` and the NDK ships only
+  `toolchains/llvm/prebuilt/windows-x86_64`. Mounted into Linux, AGP finds no `aapt`
+  and reports build-tools as *corrupted*, which reads like a broken SDK install rather
+  than a platform mismatch.
+- **The Windows `node_modules` does work** under Linux — `sdks/hermesc/linux64-bin` is
+  present and every package resolves — so `npm ci` is not needed.
+- **Git Bash rewrites `-w /app`** into a Windows path and Docker rejects it. Set
+  `MSYS_NO_PATHCONV=1`, or rely on `WORKDIR` in the Dockerfile as this one does.
+  `-v "...:/app"` is unaffected, which makes the failure look arbitrary.
+
+The result is signed with the **debug keystore**, because `expo prebuild` configures the
+release build type that way. It installs fine, but not over an EAS-signed build —
+uninstall first. For a shareable artifact, use EAS.
+
 ### 4. CI
 
 Add repository secrets `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and

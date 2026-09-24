@@ -112,6 +112,42 @@ remote push was removed from Expo Go on Android in SDK 53. Registration fails so
 with an explanatory message, so the rest of the app works either way. Sending also
 needs an EAS project id (`eas init`) because `getExpoPushTokenAsync` requires one.
 
+#### Building the Android APK
+
+```bash
+cd apps/mobile
+npx eas-cli build --platform android --profile preview   # apk, sideloadable
+```
+
+`preview` and `development` produce an **apk**; `production` produces an aab. The
+Supabase values the bundle needs are **EAS environment variables**, not `.env` —
+`EXPO_PUBLIC_*` is inlined at build time and `.env` is gitignored, so a cloud build
+relying on it would ship an app that boots straight into a configuration error.
+`eas env:list --environment preview` shows what a build will actually see.
+
+**Pin every `expo-*` package, including transitive ones.** A release APK that crashed
+on launch was `expo-font@57.0.4` against `expo-modules-core@3.0.30`:
+`NoSuchMethodError: getDirectConverter` in `FontLoaderModule`. Nothing about the build
+looks wrong, which is what makes it worth recording:
+
+- `expo@54.0.37` carries the correct `expo-font@14.0.12`, but **nested**;
+- `@expo/vector-icons` declares a peer of `expo-font: ">=14.0.4"`;
+- npm 7+ installs peer dependencies automatically, that open range matched the newest
+  release, and 57.0.4 was **hoisted to the top level** — which is the copy autolinking
+  picks, so the APK shipped a font module built against a core that does not exist in
+  it.
+
+`npx expo install --check` does **not** catch this. It only inspects direct
+dependencies and answers "Dependencies are up to date" both before and after the fix.
+`npm ls expo-font` is the check that shows it, and declaring `expo-font` directly is
+the fix.
+
+For an Android-only crash, reproduce it rather than reading the artifact: the manifest,
+the ABI list and the native `.so` files all looked correct here.
+`npx expo prebuild --platform android` then `./gradlew assembleRelease` gives an APK in
+about a minute, and `adb logcat -d | grep -A 30 'FATAL EXCEPTION'` gives the answer.
+`/android` is gitignored, so the prebuild does not dirty the tree.
+
 ### 4. CI
 
 Add repository secrets `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and

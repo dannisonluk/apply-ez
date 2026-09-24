@@ -504,7 +504,7 @@ Auditing the targets for a structured source turned up three kinds:
 | HSBC | Eightfold `GET /api/apply/v2/jobs` | ~247 HK postings, full description per position |
 | Morgan Stanley | Eightfold PCSX `GET /api/pcsx/search` | 61 HK postings, detail per posting; page size fixed at 10 |
 | AXA | Phenom `GET /api/jobs` | full description, `posted_date`, `apply_url` |
-| CLP | Oracle Recruiting Cloud `hcmRestApi` | 39 HK postings in one request; title/date/location only |
+| CLP | Oracle Recruiting Cloud `hcmRestApi` | 42 HK postings in one request, then one detail request each for the body |
 | Cathay | none | server-rendered, no JSON-LD, no XHR — DOM scraping is the only option |
 
 `workday.adapter.ts` is the first one built. It replaces a headless browser with two
@@ -574,10 +574,24 @@ while the API wants `CX_1`. It is only discoverable in the page's JavaScript, so
 adapter requires it in config and refuses to run without it: a wrong value returns
 **another site's** postings with a 200, which is worse than an error.
 
-CLP's detail endpoint is unreachable from this tenant (`400` on the finder, `404` on the
-single-resource form), so its postings carry title, date and location only. That is a
-real limitation, not a silent one — they are skipped by LLM enrichment, which needs a
-description, and relevance is unaffected because it reads the title.
+**The detail finder is `ById`, and the name matters.** For a long time this README
+said CLP's detail endpoint was unreachable from this tenant — `400` on the finder,
+`404` on the single-resource form — and that its postings therefore carried title, date
+and location only. The endpoint was always reachable; the finder name was wrong. It is
+`ById`, not `jobRequisitionDetails`:
+
+```
+recruitingCEJobRequisitionDetails?expand=all&onlyData=true
+  &finder=ById;Id="230",siteNumber=CX_1
+```
+
+`expand=all` is required here too, or the body fields come back absent rather than
+empty. The name is in no documentation and in no static HTML — a Candidate Experience
+page is a 4 KB shell and the request only exists at runtime — so it was found by loading
+a job page in a browser and reading what it asks for. The cost of the wrong conclusion
+was 43 postings stored with no description. The detail response also carries
+`Department`, `JobFamily` and the qualifications split, which the listing leaves empty,
+so the same request backfills fields the listing never had.
 
 #### Politeness is part of correctness
 
@@ -673,7 +687,7 @@ Two things generalise from this:
 Run the regression checks:
 
 ```bash
-pnpm --filter @apply-ez/scraper-core check           # all twelve suites, 748 assertions
+pnpm --filter @apply-ez/scraper-core check           # all twelve suites, 769 assertions
 pnpm --filter @apply-ez/scraper-core check:backfill  # 40
 pnpm --filter @apply-ez/scraper-core check:hk-time   # 51
 pnpm --filter @apply-ez/scraper-core check:location  # 35
@@ -685,7 +699,7 @@ pnpm --filter @apply-ez/scraper-core check:store     # 19
 pnpm --filter @apply-ez/scraper-core check:http      # 37
 pnpm --filter @apply-ez/scraper-core check:workday   # 72
 pnpm --filter @apply-ez/scraper-core check:platform  # 98
-pnpm --filter @apply-ez/scraper-core check:oracle    # 46
+pnpm --filter @apply-ez/scraper-core check:oracle    # 53
 
 pnpm --filter @apply-ez/scraper-core probe:robots    # live: is every target allowed?
 

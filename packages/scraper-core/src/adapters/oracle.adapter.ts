@@ -24,22 +24,26 @@
  *    page exists. `TotalJobsCount` and the length of `requisitionList` are the
  *    honest signals, and they are what this adapter uses.
  *
- * ## Listing only — and what that costs
+ * ## The listing carries no description; the detail resource does
  *
  * CLP's listing carries a title, a posted date and a location, and nothing else:
  * `ShortDescriptionStr`, `ExternalQualificationsStr`, `ExternalResponsibilitiesStr`,
- * `Department`, `JobFamily` and `PostingEndDate` are empty on all 39 postings.
+ * `Department`, `JobFamily` and `PostingEndDate` are empty on every posting. So the
+ * body has to come from the detail resource.
  *
- * There is a detail resource, but its finder is not reachable from this tenant —
- * `recruitingCEJobRequisitionDetails?finder=jobRequisitionDetails;requisitionId={id},siteNumber={site}`
- * answers `400 URL request parameter finder with value … is not valid`, with or
- * without `expand=all` and `languageCode`, and the single-resource form
- * (`recruitingCEJobRequisitions/{id}`) 404s. So these postings land with no
- * description. Consequences, stated so they are not mistaken for bugs later:
+ * **The finder name is `ById`, not `jobRequisitionDetails`.** This adapter previously
+ * tried `finder=jobRequisitionDetails;requisitionId={id}` — which answers
+ * `400 URL request parameter finder with value … is not valid` — and concluded, in
+ * this comment, that the resource was unreachable from this tenant. It is reachable;
+ * the name was wrong. A Candidate Experience job page fetches its own body with:
  *
- *   - the LLM enrichment layer skips them (`OPENROUTER_MIN_DESCRIPTION_CHARS`), so
- *     they show title / company / location only, with no summary;
- *   - relevance scoring is unaffected — it reads the title, never the description.
+ *   recruitingCEJobRequisitionDetails?expand=all&onlyData=true
+ *     &finder=ById;Id="230",siteNumber=CX_1
+ *
+ * That name appears in no documentation and in no static HTML — the page is a 4 KB
+ * shell and the request only exists at runtime — so it was found by loading a job
+ * page in a browser and reading what it asks for. The cost of the wrong conclusion
+ * was 43 postings stored with no description.
  *
  * ## `siteNumber` must be configured, never guessed
  *
@@ -53,9 +57,13 @@ import { readPositiveInt } from '../lib/concurrency.js';
 import { normalizeText } from '../lib/text.js';
 import { parseHongKongDateTime } from '../lib/hk-time.js';
 import { fetchJson } from '../lib/http-json.js';
+import { FailureCircuit } from '../lib/circuit.js';
+import { canSkipDetail } from './adapter.interface.js';
 
 const DEFAULT_PAGE_LIMIT = 100;
 const DEFAULT_MAX_JOBS = 300;
+const DEFAULT_DETAIL_MAX_JOBS = 400;
+const DETAIL_CONCURRENCY = 3;
 const REQUEST_TIMEOUT_MS = 30_000;
 /** Safety net: a `TotalJobsCount` that never converges must not loop forever. */
 const MAX_PAGES = 20;
@@ -76,6 +84,14 @@ interface OracleRequisition {
   JobFunction?: string | null;
   WorkerType?: string | null;
   WorkplaceType?: string | null;
+}
+
+/** `items[0]` of the detail resource. Only the body fields are read. */
+interface OracleDetail {
+  Id?: string | number;
+  ExternalDescriptionStr?: string | null;
+  ExternalQualificationsStr?: string | null;
+  ExternalResponsibilitiesStr?: string | null;
 }
 
 interface OracleSearchItem {
@@ -138,6 +154,27 @@ export function isValidSiteNumber(value: string): boolean {
 }
 
 /** Build the human-facing job page URL. */
+/**
+ * The single-requisition endpoint that carries the posting body.
+ *
+ * `expand=all` is mandatory here too: without it the body fields come back absent
+ * rather than empty. The finder value keeps its literal `;` and `,` — they are that
+ * grammar's own delimiters — while the id is percent-quoted, which is what the
+ * Candidate Experience page sends.
+ */
+export function buildDetailUrl(apiBase: string, siteNumber: string, id: string): string {
+  // Swapped off the LISTING base rather than built from `endpoint.origin`, and after
+  // `ctx.config.apiBase` has been applied. Building it from the origin meant the
+  // checks reached the live tenant while the listing reached the mock server — real
+  // network calls inside a unit test, which is how this was noticed.
+  const base = apiBase.replace(
+    /\/recruitingCEJobRequisitions$/,
+    '/recruitingCEJobRequisitionDetails',
+  );
+  const finder = `ById;Id=%22${encodeURIComponent(id)}%22,siteNumber=${encodeURIComponent(siteNumber)}`;
+  return `${base}?expand=all&onlyData=true&finder=${finder}`;
+}
+
 export function buildJobUrl(endpoint: OracleEndpoint, id: string): string {
   if (!endpoint.siteSlug) return `${endpoint.origin}/hcmUI/CandidateExperience/${endpoint.locale}/jobs`;
   return `${endpoint.origin}/hcmUI/CandidateExperience/${endpoint.locale}/sites/${endpoint.siteSlug}/job/${id}`;
@@ -288,6 +325,64 @@ export class OracleAdapter implements ScraperAdapter {
 
     ctx.logger.info('oracle: listed', { collected: collected.length, reportedTotal: total });
 
+    // ── detail stage ──────────────────────────────────────────────────────────
+    // The listing has no body at all, so this is the only source of the description.
+    // It is also the only place `ExternalQualificationsStr` and
+    // `ExternalResponsibilitiesStr` are populated, which is where the section
+    // headings come from.
+    const includeDetail = ctx.config.includeDetailPages !== false;
+    const detailMaxJobs = readPositiveInt(ctx.config.maxDetailJobs, DEFAULT_DETAIL_MAX_JOBS);
+    const details = new Map<string, OracleDetail>();
+
+    if (includeDetail) {
+      // Same reasoning as the other adapters: once the host starts refusing detail
+      // requests, the rest of the batch is waste and every extra request extends the
+      // refusal.
+      const circuit = new FailureCircuit();
+
+      const pending = collected
+        .slice(0, maxJobs)
+        .map((row) => (row.Id === undefined ? '' : String(row.Id)))
+        // A posting already stored already carries its body, and `cli.ts` drops known
+        // postings from the upsert anyway — so its detail page is pure waste.
+        .filter((id) => id && !canSkipDetail(ctx, id))
+        .slice(0, detailMaxJobs);
+
+      const queue = [...pending];
+      const workers = Array.from({ length: Math.min(DETAIL_CONCURRENCY, queue.length) }, async () => {
+        for (;;) {
+          const id = queue.shift();
+          if (!id || circuit.isOpen) return;
+
+          let reason = '';
+          const payload = await fetchJson<{ items?: OracleDetail[] }>(
+            buildDetailUrl(apiBase, siteNumber, id),
+            { timeoutMs: REQUEST_TIMEOUT_MS, onFailure: (why) => { reason = why; } },
+          );
+
+          const item = payload?.items?.[0];
+          if (item) {
+            details.set(id, item);
+            circuit.recordSuccess();
+          } else {
+            circuit.recordFailure();
+            errors.push({
+              message: `oracle: detail failed for id=${id}`,
+              context: { detail: reason || 'no item in response', siteNumber },
+            });
+          }
+        }
+      });
+
+      await Promise.all(workers);
+
+      ctx.logger.info('oracle: detail stage', {
+        requested: pending.length,
+        fetched: details.size,
+        ...(circuit.isOpen ? { aborted: circuit.describe() } : {}),
+      });
+    }
+
     // ── map to RawJob ─────────────────────────────────────────────────────────
     const nowIso = new Date().toISOString();
     const jobs: RawJob[] = [];
@@ -306,6 +401,19 @@ export class OracleAdapter implements ScraperAdapter {
       // so nothing here is promoted to `applicationDeadline`.
       const publishedAt = parseHongKongDateTime(row.PostedDate, new Date()) ?? nowIso;
 
+      // Assembled in the order a reader expects, and joined with newlines so the
+      // section parser can tell where one block ends and the next begins. The
+      // listing's own fields are empty, so this is the only content there is.
+      const detailRow = details.get(id);
+      const description = [
+        detailRow?.ExternalDescriptionStr,
+        detailRow?.ExternalResponsibilitiesStr,
+        detailRow?.ExternalQualificationsStr,
+      ]
+        .map((part) => (typeof part === 'string' ? part : ''))
+        .filter((part) => part.trim().length > 0)
+        .join('\n');
+
       jobs.push({
         source: 'COMPANY_WEBSITE',
         externalId: id,
@@ -318,6 +426,7 @@ export class OracleAdapter implements ScraperAdapter {
         ...(ctx.config.companyDomain ? { companyDomain: String(ctx.config.companyDomain) } : {}),
         ...(row.Department ? { department: normalizeText(row.Department) } : {}),
         ...(row.WorkerType ? { rawEmploymentType: normalizeText(row.WorkerType) } : {}),
+        ...(description ? { description } : {}),
         topMetadata: {},
       });
     }

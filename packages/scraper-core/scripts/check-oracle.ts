@@ -18,6 +18,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net';
 import {
   OracleAdapter,
+  buildDetailUrl,
   buildJobUrl,
   isValidSiteNumber,
   parseOracleUrl,
@@ -61,6 +62,35 @@ check('oracle url: no /sites/ segment is tolerated', parseOracleUrl('https://x.o
 check('oracle url: a non-Oracle URL is rejected', parseOracleUrl('https://careers.example.com/jobs'), undefined);
 check('oracle url: garbage is rejected', parseOracleUrl('not a url'), undefined);
 
+// ─── buildDetailUrl ───────────────────────────────────────────────────────────
+// The finder NAME is the whole point. `jobRequisitionDetails` — the name this
+// adapter used to send, and which its own comment recorded as unreachable — answers
+// `400 ... finder with value ... is not valid`. `ById` is what works. Pinned as a
+// literal because getting it wrong fails every posting at once, and the error names
+// the finder rather than the caller, so it reads like a tenant limitation.
+const detailUrl = buildDetailUrl(clp!.apiBase, 'CX_1', '230');
+check(
+  'detail url: ById finder, quoted id, literal ; and , delimiters',
+  detailUrl,
+  'https://iabhtj.fa.ocs.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitionDetails' +
+    '?expand=all&onlyData=true&finder=ById;Id=%22230%22,siteNumber=CX_1',
+);
+check(
+  'detail url: asks for expand=all, without which the body fields are absent',
+  detailUrl.includes('expand=all'),
+  true,
+);
+check(
+  'detail url: never uses the finder name that answers 400',
+  detailUrl.includes('jobRequisitionDetails;'),
+  false,
+);
+check(
+  'detail url: the id is percent-quoted inside the finder',
+  detailUrl.includes('Id=%22%22') === false && detailUrl.includes('%22230%22'),
+  true,
+);
+
 // ─── isValidSiteNumber ────────────────────────────────────────────────────────
 // The site number is interpolated into the finder VALUE, where `;` and `,` are
 // delimiters. Anything that could inject another finder parameter is refused.
@@ -89,6 +119,7 @@ const TOTAL = 39;
 
 interface OracleState {
   requests: number;
+  detailRequests: number;
   offsets: number[];
   /** Simulate the missing-`expand` failure: a total, but no rows. */
   dropRows: boolean;
@@ -98,12 +129,48 @@ interface OracleState {
 }
 
 function newState(overrides: Partial<OracleState> = {}): OracleState {
-  return { requests: 0, offsets: [], dropRows: false, status: 200, echoLimit: 200, ...overrides };
+  return {
+    requests: 0,
+    detailRequests: 0,
+    offsets: [],
+    dropRows: false,
+    status: 200,
+    echoLimit: 200,
+    ...overrides,
+  };
 }
 
 function startOracleMock(state: OracleState) {
   return createServer((req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? '', 'http://127.0.0.1');
+    // The detail resource. Served separately because the finder grammar is
+    // different from the listing's: `ById;Id="230"` rather than `findReqs;...`.
+    if (url.pathname.endsWith('/recruitingCEJobRequisitionDetails')) {
+      state.detailRequests += 1;
+      const finder = url.searchParams.get('finder') ?? '';
+      const id = /Id="?(\d+)"?/.exec(finder)?.[1] ?? '';
+      // Without `expand=all` the body fields come back absent, which is what the
+      // real tenant does — so the mock refuses to invent them either.
+      const expanded = url.searchParams.get('expand') === 'all';
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          items:
+            expanded && id
+              ? [
+                  {
+                    Id: id,
+                    ExternalDescriptionStr: `<p>About the role ${id}</p>`,
+                    ExternalResponsibilitiesStr: '<p>Responsibilities:</p><ul><li>Do the thing</li></ul>',
+                    ExternalQualificationsStr: '<p>Requirements:</p><ul><li>Have experience</li></ul>',
+                  },
+                ]
+              : [],
+        }),
+      );
+      return;
+    }
+
     if (!url.pathname.endsWith('/recruitingCEJobRequisitions')) {
       res.writeHead(404);
       res.end();
@@ -189,7 +256,8 @@ async function main(): Promise<void> {
 
   check('oracle crawl: every posting collected', result.jobs.length, TOTAL);
   check('oracle crawl: no duplicates', new Set(result.jobs.map((j) => j.externalId)).size, TOTAL);
-  check('oracle crawl: no errors', result.errors.length, 0);
+  if (result.errors.length) console.log('DEBUG errors:', JSON.stringify(result.errors.slice(0, 3), null, 1));
+check('oracle crawl: no errors', result.errors.length, 0);
   // 39 postings at a page limit of 25 is two pages: 0 and 25.
   check('oracle crawl: two pages requested', state.requests, 2);
   check('oracle crawl: offsets advanced by the page size', state.offsets, [0, 25]);
@@ -202,7 +270,28 @@ async function main(): Promise<void> {
   check('oracle crawl: url points at the CLP site slug', /\/sites\/CLP-Recruitment-System\/job\/1000$/.test(result.jobs[0]?.url ?? ''), true);
   check('oracle crawl: applyUrl matches url', result.jobs[0]?.applyUrl, result.jobs[0]?.url);
   check('oracle crawl: publishedAt from PostedDate', result.jobs[0]?.publishedAt?.startsWith('2026-09-2'), true);
-  check('oracle crawl: no description is claimed', result.jobs[0]?.description, undefined);
+  // This assertion used to read `expected undefined` — the adapter landed every CLP
+  // posting with no description, because the detail resource was believed to be
+  // unreachable. It is reachable via `finder=ById`; see `buildDetailUrl`.
+  check(
+    'oracle crawl: the description comes from the detail resource',
+    typeof result.jobs[0]?.description === 'string' &&
+      result.jobs[0]!.description!.includes('About the role 1000'),
+    true,
+  );
+  check(
+    'oracle crawl: all three detail body fields are joined',
+    ['Responsibilities:', 'Requirements:'].every((marker) =>
+      (result.jobs[0]?.description ?? '').includes(marker),
+    ),
+    true,
+  );
+  check('oracle crawl: one detail request per posting', state.detailRequests, TOTAL);
+  check(
+    'oracle crawl: the detail request asks for expand=all',
+    result.jobs[0]?.description?.includes('Have experience'),
+    true,
+  );
 
   // ── the expand trap ────────────────────────────────────────────────────────
   // HTTP 200, `TotalJobsCount: 39`, zero rows. Reporting this as a clean empty

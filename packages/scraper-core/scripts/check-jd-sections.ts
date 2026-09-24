@@ -220,6 +220,48 @@ check(
   true,
 );
 
+// ── Chinese postings ─────────────────────────────────────────────────────────
+//
+// Half the board is Chinese, and CJK breaks the Latin assumptions in two places.
+// There are no spaces, so a word-count guard does not bound a line: every Chinese
+// sentence is "one word". A CLP bullet ending in 要求 was therefore read as a heading
+// because 要求 is in the section vocabulary, which silently stole it from the bullet
+// list above it. CJK lines are measured in characters instead.
+const chinese = buildJdSections({
+  description: [
+    '辦公室地點： 葵涌區',
+    '僱傭期： 兩年合約 （可續約）',
+    '職務：',
+    '按有關規格、程序及標準，進行高壓及低壓電力設備及相關系統的調試',
+    '提供適當技術支援，以確保維修工作符合有關品質及安全要求',
+    '資格：',
+    '具中三或以上程度',
+    '持有A級電業工程人員註冊證明',
+  ].join('\n'),
+});
+check('cjk: the intro keeps its two lines', chinese[0]?.heading, null);
+check('cjk: 職務 is a heading', chinese[1]?.heading, '職務');
+check(
+  'cjk: BOTH duties are bullets — the one containing 要求 must not become a heading',
+  chinese[1]?.blocks[0]?.kind === 'bullets' ? chinese[1]!.blocks[0]!.items.length : 0,
+  2,
+);
+check('cjk: 資格 is a heading', chinese[2]?.heading, '資格');
+check(
+  'cjk: both qualifications are kept',
+  chinese[2]?.blocks[0]?.kind === 'bullets' ? chinese[2]!.blocks[0]!.items.length : 0,
+  2,
+);
+check('cjk: no stray section was created', chinese.length, 3);
+check(
+  'cjk: a long Chinese sentence is never a heading',
+  buildJdSections({ description: '本職位要求應徵者具備良好的溝通能力及團隊合作精神，並能獨立處理日常工作' })
+    .length === 1 &&
+    buildJdSections({ description: '本職位要求應徵者具備良好的溝通能力及團隊合作精神，並能獨立處理日常工作' })[0]
+      ?.heading === null,
+  true,
+);
+
 // ── bounds and degenerate input ──────────────────────────────────────────────
 
 check('empty input yields nothing', buildJdSections({}), []);

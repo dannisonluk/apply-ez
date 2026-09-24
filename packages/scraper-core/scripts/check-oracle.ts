@@ -287,6 +287,19 @@ check('oracle crawl: no errors', result.errors.length, 0);
     true,
   );
   check('oracle crawl: one detail request per posting', state.detailRequests, TOTAL);
+  // The detail body is HTML on the wire. Rendering it verbatim is what the detail
+  // page did before this was caught on a device, so the absence of tags is pinned.
+  check(
+    'oracle crawl: the description carries no HTML tags',
+    /<[a-z/][^>]*>/i.test(result.jobs[0]?.description ?? ''),
+    false,
+  );
+  check(
+    'oracle crawl: HTML entities are decoded',
+    (result.jobs[0]?.description ?? '').includes('&nbsp;') ||
+      (result.jobs[0]?.description ?? '').includes('&amp;'),
+    false,
+  );
   check(
     'oracle crawl: the detail request asks for expand=all',
     result.jobs[0]?.description?.includes('Have experience'),

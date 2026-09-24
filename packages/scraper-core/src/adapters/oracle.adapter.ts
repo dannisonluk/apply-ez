@@ -54,7 +54,7 @@
  */
 import type { RawJob, ScrapeContext, ScrapeResult, ScraperAdapter } from './adapter.interface.js';
 import { readPositiveInt } from '../lib/concurrency.js';
-import { normalizeText } from '../lib/text.js';
+import { normalizeText, stripHtmlToText } from '../lib/text.js';
 import { parseHongKongDateTime } from '../lib/hk-time.js';
 import { fetchJson } from '../lib/http-json.js';
 import { FailureCircuit } from '../lib/circuit.js';
@@ -405,13 +405,17 @@ export class OracleAdapter implements ScraperAdapter {
       // section parser can tell where one block ends and the next begins. The
       // listing's own fields are empty, so this is the only content there is.
       const detailRow = details.get(id);
+      // The detail body is HTML (`<p>`, `<ul><li>`, `&nbsp;`). It has to be
+      // converted here rather than downstream: the section parser works on text, and
+      // without this the detail page renders the markup verbatim — which is exactly
+      // what it did the first time these fields were wired up.
       const description = [
         detailRow?.ExternalDescriptionStr,
         detailRow?.ExternalResponsibilitiesStr,
         detailRow?.ExternalQualificationsStr,
       ]
-        .map((part) => (typeof part === 'string' ? part : ''))
-        .filter((part) => part.trim().length > 0)
+        .map((part) => (typeof part === 'string' ? stripHtmlToText(part) : ''))
+        .filter((part) => part.length > 0)
         .join('\n');
 
       jobs.push({

@@ -233,7 +233,7 @@ const JD_HEADING_LABELS =
  * render and does not look like a job description.
  */
 const JD_LIST_HEADINGS =
-  /\b(?:responsibilities|duties|requirements|qualifications|skills|competencies|benefits)\b/i;
+  /\b(?:responsibilities|duties|requirements|qualifications|skills|competencies|benefits)\b|職務|職責|資格|要求|條件|技能|福利|待遇/i;
 
 /** Lines that are page furniture, not description. */
 const JD_NOISE_LINE = /^(?:application deadline|closing date|job ref(?:erence)?|req(?:uisition)? id|apply now|share this job)\b/i;
@@ -266,7 +266,22 @@ function isBulletLine(value: string): boolean {
  * a sentence that happens to use the same noun.
  */
 const JD_HEADING_KEYWORDS =
-  /\b(?:responsibilities|duties|requirements|qualifications|skills|competencies|benefits|summary|overview|introduction|profile|background)\b/i;
+  /\b(?:responsibilities|duties|requirements|qualifications|skills|competencies|benefits|summary|overview|introduction|profile|background)\b|職務|職責|資格|要求|條件|簡介|內容|技能|福利|待遇|我們提供/i;
+
+/**
+ * Whether a line is short enough to be a label rather than prose.
+ *
+ * Word count works for Latin text but not for Chinese, which has no spaces: every
+ * Chinese sentence is "one word" by `split(/\s+/)`, so the guard let a full sentence
+ * through as soon as it contained a section word. A CLP bullet reading
+ * "…符合有關品質及安全要求" was taken for a heading because it ends in 要求, and the
+ * bullet before it was left alone in its section. CJK lines are therefore measured in
+ * characters.
+ */
+function isLabelSized(bare: string): boolean {
+  if (/[\u3400-\u9fff]/.test(bare)) return bare.length <= 12;
+  return bare.split(/\s+/).length <= 6;
+}
 
 function looksLikeJdHeading(line: string, nextIsBullet: boolean): boolean {
   const bare = stripHeadingColon(line);
@@ -276,11 +291,11 @@ function looksLikeJdHeading(line: string, nextIsBullet: boolean): boolean {
   if (JD_HEADING_LABELS.test(bare)) return true;
   // A keyword only marks a heading in a label-sized line, which is what keeps a
   // prose sentence containing the same noun out.
-  if (JD_HEADING_KEYWORDS.test(bare) && bare.split(/\s+/).length <= 6) return true;
+  if (JD_HEADING_KEYWORDS.test(bare) && isLabelSized(bare)) return true;
   // "The team:" — an explicit colon is the author telling us it is a label.
   if (/[:：]\s*$/.test(line)) return true;
   // A short line directly above bullets is introducing them.
-  return nextIsBullet && bare.split(/\s+/).length <= 6;
+  return nextIsBullet && isLabelSized(bare);
 }
 
 function clampText(value: string): string {

@@ -459,8 +459,18 @@ export async function extractDetail(page: Page, url: string, platform: Platform)
   // instead of returning an empty object.
   const readPageText = async (): Promise<string | undefined> => {
     try {
-      const html = await page.content();
-      const text = stripHtmlToText(html);
+      // Prefer the page's main content region. Reading the whole document starts at
+      // the navigation, and the job description sits far enough down that the read is
+      // truncated before it ever gets there — SHKP postings stored 400 characters of
+      // menu ("Skip to main content … About Us Corporate Profile …") and nothing else.
+      // Every platform this falls back for is a marketing site with a main landmark,
+      // so the whole document is only used when that landmark is missing or tiny.
+      const mainText = await page
+        .locator('[role="main"], #main-content, main')
+        .first()
+        .innerText()
+        .catch(() => '');
+      const text = mainText.trim().length > 200 ? mainText : stripHtmlToText(await page.content());
       if (!text) return undefined;
       return text.length > 30_000 ? text.slice(0, 30_000) : text;
     } catch {

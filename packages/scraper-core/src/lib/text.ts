@@ -15,6 +15,28 @@ export function normalizeText(value: string | undefined | null): string {
   return value?.replace(/\s+/g, ' ').trim() ?? '';
 }
 
+/**
+ * Tidy a multi-line body without destroying its line structure.
+ *
+ * `normalizeText` collapses every run of whitespace to a single space. That is right
+ * for a title, a location or a company name, and wrong for a job description: the
+ * section parser reads newlines to tell where one heading ends and the next begins,
+ * so flattening the body leaves one long paragraph and no sections at all. SHKP
+ * postings and three Swire ones stored exactly that — a single 400-character block
+ * that had been the page's navigation and title, with the description itself cut off
+ * by the paragraph clamp before the reader ever reached it.
+ */
+export function normalizeMultilineText(value: string | undefined | null): string {
+  return (
+    value
+      ?.replace(/\r\n?/g, '\n')
+      .replace(/[ \t]+/g, ' ')
+      .replace(/ *\n */g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim() ?? ''
+  );
+}
+
 export function toAbsoluteUrl(rawUrl: string, pageUrl: string): string {
   try {
     return rawUrl.startsWith('http') ? new URL(rawUrl).toString() : new URL(rawUrl, pageUrl).toString();

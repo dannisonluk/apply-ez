@@ -318,7 +318,10 @@ export const SCRAPE_TARGETS: ScrapeTarget[] = [
       companyDomain: 'shkp.com',
       maxPages: 1,
       maxJobs: 100,
-      includeDetailPages: false,
+      // See corporate-careers.adapter.ts: the JD lives only on the detail page, and
+      // the listing blurb alone left every posting without responsibilities or
+      // requirements.
+      includeDetailPages: true,
       reconcileMissingJobs: true,
     },
     enabled: true,

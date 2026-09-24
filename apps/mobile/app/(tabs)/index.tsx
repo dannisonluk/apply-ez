@@ -5,9 +5,11 @@ import {
   FlatList,
   Pressable,
   RefreshControl,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -109,6 +111,7 @@ export default function JobsScreen(): React.JSX.Element {
   const theme = useTheme();
   const s = styles[theme.scheme];
   const insets = useSafeAreaInsets();
+  const { height: windowHeight } = useWindowDimensions();
   const router = useRouter();
 
   const {
@@ -436,6 +439,18 @@ export default function JobsScreen(): React.JSX.Element {
 
       {panelOpen ? (
         <View testID="filters-panel" style={s.panel}>
+          {/* The panel renders above the list rather than inside it, so when it grows
+              taller than the space left under the header there is nothing to scroll
+              it and the last facets fall off the bottom of the screen with no way to
+              reach them. Capping the height and scrolling the facets keeps every
+              filter reachable without turning the whole screen into a scroll view,
+              which would break the list's own scrolling and pull-to-refresh. */}
+          <ScrollView
+            style={{ maxHeight: Math.round(windowHeight * 0.55) }}
+            contentContainerStyle={s.panelScrollContent}
+            nestedScrollEnabled
+            showsVerticalScrollIndicator
+          >
           <FilterSection label="Sort" testID="facet-sort">
             {SORTS.map((option) => (
               <OptionChip
@@ -506,6 +521,7 @@ export default function JobsScreen(): React.JSX.Element {
               <Text style={s.clearText}>Clear all filters</Text>
             </Pressable>
           ) : null}
+          </ScrollView>
         </View>
       ) : null}
 
@@ -895,6 +911,9 @@ const makeStyles = (theme: Theme) =>
     },
     panelToggleTextActive: {
       color: theme.color.primary,
+    },
+    panelScrollContent: {
+      gap: theme.space(3),
     },
     panel: {
       marginHorizontal: theme.space(4),

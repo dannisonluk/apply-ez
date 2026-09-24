@@ -280,37 +280,27 @@ export interface PushTokenInput {
 /**
  * Register (or refresh) this device's Expo push token.
  *
- * Upserts on `token` so re-launching the app does not accumulate rows. The RLS
- * policy on `push_tokens` allows anon insert/update for exactly this call — see
- * the note in `0002_push_tokens.sql` about the trade-off.
+ * Goes through `register_push_token` rather than writing the table. A direct upsert
+ * cannot work here: `ON CONFLICT DO UPDATE` has to see the existing row, and anon has
+ * no SELECT on `push_tokens` by design, so Postgres rejects it with an RLS error that
+ * names the INSERT policy instead of the missing read. The function runs as its owner
+ * and keeps the table unreadable from the client — see `0006_push_token_rpc.sql`.
  */
 export async function registerPushToken(input: PushTokenInput): Promise<void> {
-  await rest('/push_tokens', {
-    method: 'POST',
-    body: [
-      {
-        token: input.token,
-        device_id: input.deviceId,
-        platform: input.platform,
-        device_name: input.deviceName ?? null,
-        enabled: true,
-        last_seen_at: new Date().toISOString(),
-      },
-    ],
-    prefer: 'resolution=merge-duplicates,return=minimal',
-    query: 'on_conflict=token',
+  await rpc('register_push_token', {
+    p_token: input.token,
+    p_device_id: input.deviceId,
+    p_platform: input.platform,
+    p_device_name: input.deviceName ?? null,
   });
 }
 
 /** Called when the user turns notifications off, or when Expo reports the token
- *  as no longer registered. */
+ *  as no longer registered. Also an RPC, for the same reason as registration: a
+ *  `PATCH ?token=eq.…` matches zero rows when the row is invisible, and answers 204
+ *  while changing nothing. */
 export async function disablePushToken(token: string): Promise<void> {
-  await rest('/push_tokens', {
-    method: 'PATCH',
-    body: { enabled: false, last_seen_at: new Date().toISOString() },
-    prefer: 'return=minimal',
-    query: `token=eq.${encodeURIComponent(token)}`,
-  });
+  await rpc('disable_push_token', { p_token: token });
 }
 
 /** Resume slots stored on the single-user `profile` row. Service-role only, so

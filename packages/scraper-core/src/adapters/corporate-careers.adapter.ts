@@ -13,6 +13,7 @@ import {
   extractShkpItemsFromJson,
   extractTowngasItemsFromDom,
 } from './corporate-careers/extract-list.js';
+import { normalizeMultilineText } from '../lib/text.js';
 import { PLATFORM_SELECTORS } from './corporate-careers/selectors.js';
 import type { CorporateCareersConfig, DetailResult, Platform, ScrapedListItem } from './corporate-careers/types.js';
 import {
@@ -253,8 +254,10 @@ function buildJob(
   const url = detail?.url ?? (platform === 'taleo' ? normalizeTaleoUrl(normalizedItem, normalizedItem.title) : normalizedItem.url);
   const externalId =
     platform === 'taleo' ? normalizeTaleoExternalId(url, normalizedItem.title) : normalizeExternalId(url, normalizedItem.title);
+  // `normalizeMultilineText`, not `normalizeText`: the body has to keep its newlines
+  // for the section parser to find headings in it. See the note on that helper.
   const description =
-    normalizeText(detail?.description) ||
+    normalizeMultilineText(detail?.description) ||
     descriptionFromSections(detail?.sectionContent, item.description) ||
     `${item.title} at ${cfg.companyName}.`;
   const metaEmploymentType =
@@ -514,7 +517,15 @@ export class CorporateCareersAdapter implements ScraperAdapter {
               newItems += 1;
 
               let detail: Awaited<ReturnType<typeof extractDetail>> | undefined;
-              if (cfg.includeDetailPages && platform !== 'shkp') {
+              // SHKP used to be excluded here. Its detail pages are allowed by
+              // robots.txt (the `Disallow: /*?` rule is about query strings, and the
+              // `/en-us` rule is lowercase so it does not match `/en-US/...`), they
+              // answer 200 to the declared scraper user agent, and `extractDetail`
+              // has a page-text fallback for platforms it has no structured
+              // extractor for. Without the detail fetch its postings carried a
+              // one-line listing blurb and nothing else — no responsibilities, no
+              // requirements — which is what the detail page looked like.
+              if (cfg.includeDetailPages) {
                 const detailPage = await context.newPage();
                 try {
                   detail = await throttledFetch(item.url, () =>

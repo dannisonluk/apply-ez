@@ -17,6 +17,7 @@
  */
 import assert from 'node:assert/strict';
 import { buildJdSections } from '../src/types/section-content.js';
+import { normalizeMultilineText, normalizeText } from '../src/lib/text.js';
 
 let passed = 0;
 const failures: string[] = [];
@@ -261,6 +262,56 @@ check(
       ?.heading === null,
   true,
 );
+
+// ── normalizeMultilineText ───────────────────────────────────────────────────
+//
+// The adapters used to tidy the scraped body with `normalizeText`, which collapses
+// every run of whitespace to a single space. That is right for a title and fatal for
+// a description: the splitter above reads newlines to find headings, so a flattened
+// body is one long paragraph with no sections at all. SHKP stored 400 characters of
+// navigation that way on all 33 postings, and three Swire ones did the same.
+// Template literals rather than escape sequences: this is the one place the test is
+// about literal newlines, and `\n` written through a shell heredoc does not survive
+// the trip intact.
+const twoLines = `Requirements:
+- one
+- two`;
+
+check(
+  'normalizeText flattens newlines — which is why it must not touch a description',
+  normalizeText(twoLines),
+  'Requirements: - one - two',
+);
+check(
+  'normalizeMultilineText keeps the line structure',
+  normalizeMultilineText(twoLines),
+  twoLines,
+);
+check(
+  'normalizeMultilineText tidies runs of spaces and blank lines',
+  normalizeMultilineText(`  a   b 
+
+
+
+ c  `),
+  `a b
+
+c`,
+);
+check(
+  'normalizeMultilineText normalises CRLF',
+  normalizeMultilineText(`a
+b`),
+  `a
+b`,
+);
+check('normalizeMultilineText handles empty input', normalizeMultilineText(''), '');
+
+// The point of it: the same text yields sections only when the newlines survive.
+const flattened = buildJdSections({ description: normalizeText(twoLines) });
+check('a flattened body yields no headings', flattened.some((x) => x.heading), false);
+const preserved = buildJdSections({ description: normalizeMultilineText(twoLines) });
+check('a line-preserved body yields the heading', preserved[0]?.heading, 'Requirements');
 
 // ── bounds and degenerate input ──────────────────────────────────────────────
 

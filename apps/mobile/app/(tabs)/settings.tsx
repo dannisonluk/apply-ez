@@ -390,7 +390,7 @@ export default function SettingsScreen(): React.JSX.Element {
             label="Expo SDK"
             value={String(Constants.expoConfig?.sdkVersion ?? '54')}
           />
-          <DetailRow icon="git-branch-outline" label="Scraper" value="12 HK employers" />
+          <DetailRow icon="git-branch-outline" label="Offer God" value="12 HK employers" />
           <DetailRow icon="time-outline" label="Schedule" value="Every 6 hours" />
         </Card>
       </Section>

@@ -1,12 +1,14 @@
 import { Ionicons } from '@expo/vector-icons';
 import { Tabs } from 'expo-router';
 import React from 'react';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useJobs } from '../../src/state/jobs';
 import { useSession } from '../../src/state/session';
 import { useTheme } from '../../src/theme';
 
 export default function TabsLayout(): React.JSX.Element {
   const theme = useTheme();
+  const insets = useSafeAreaInsets();
   const { newCount } = useJobs();
   const { applications } = useSession();
 
@@ -19,6 +21,13 @@ export default function TabsLayout(): React.JSX.Element {
         tabBarStyle: {
           backgroundColor: theme.color.surface,
           borderTopColor: theme.color.border,
+          // Sized explicitly rather than left to the default. react-navigation derives
+          // the bar height from the safe-area inset alone, which on a gesture-nav
+          // device leaves the icon and label sitting on the home indicator and looking
+          // clipped. The inset is still honoured; it just is not the only term.
+          height: 58 + insets.bottom,
+          paddingTop: theme.space(1.5),
+          paddingBottom: insets.bottom + theme.space(1.5),
         },
         tabBarLabelStyle: { fontSize: 11, fontWeight: '600' },
         sceneStyle: { backgroundColor: theme.color.background },
